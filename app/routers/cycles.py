@@ -317,11 +317,15 @@ async def batch_import_feedings_abw(
     abw_samples_written = 0
 
     for day in payload.days:
-        log = logs_by_date.get(day.date)
-        if not log:
+        if day.date not in logs_by_date:
             log = DailyLog(cycle_id=cycle_id, date=day.date)
             db.add(log)
             logs_by_date[day.date] = log
+
+    await db.flush()
+
+    for day in payload.days:
+        log = logs_by_date[day.date]
 
         if day.abw_g is not None:
             log.abw_g = day.abw_g
