@@ -351,7 +351,7 @@ async def batch_import_feedings_abw(
                 feedings_updated += 1
             else:
                 feeding = FeedingSession(
-                    daily_log_id=log.id,
+                    daily_log=log,
                     feed_time=incoming.feed_time,
                     amount_kg=incoming.amount_kg,
                     additives=[],
