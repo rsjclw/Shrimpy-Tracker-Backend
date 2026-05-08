@@ -3,9 +3,8 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
@@ -307,7 +306,6 @@ async def batch_import_feedings_abw(
     result = await db.execute(
         select(DailyLog)
         .where(DailyLog.cycle_id == cycle_id, DailyLog.date.in_(target_dates))
-        .options(selectinload(DailyLog.feedings))
     )
     logs_by_date = {log.date: log for log in result.scalars().all()}
 
@@ -324,6 +322,23 @@ async def batch_import_feedings_abw(
 
     await db.flush()
 
+    log_ids = [log.id for log in logs_by_date.values()]
+    existing_by_log_id: dict[UUID, dict[dtime, FeedingSession]] = {
+        log.id: {} for log in logs_by_date.values()
+    }
+    if payload.replace_feedings:
+        if log_ids:
+            delete_result = await db.execute(
+                delete(FeedingSession).where(FeedingSession.daily_log_id.in_(log_ids))
+            )
+            feedings_deleted = delete_result.rowcount or 0
+    elif log_ids:
+        feedings_result = await db.execute(
+            select(FeedingSession).where(FeedingSession.daily_log_id.in_(log_ids))
+        )
+        for feeding in feedings_result.scalars().all():
+            existing_by_log_id.setdefault(feeding.daily_log_id, {})[feeding.feed_time] = feeding
+
     for day in payload.days:
         log = logs_by_date[day.date]
 
@@ -332,17 +347,7 @@ async def batch_import_feedings_abw(
             log.abw_sample_time = payload.abw_sample_time
             abw_samples_written += 1
 
-        if payload.replace_feedings:
-            for feeding in list(log.feedings):
-                await db.delete(feeding)
-                feedings_deleted += 1
-            log.feedings.clear()
-            await db.flush()
-            existing_by_time = {}
-        else:
-            existing_by_time = {
-                feeding.feed_time: feeding for feeding in log.feedings
-            }
+        existing_by_time = existing_by_log_id.setdefault(log.id, {})
 
         for incoming in day.feedings:
             existing = existing_by_time.get(incoming.feed_time)
@@ -351,7 +356,7 @@ async def batch_import_feedings_abw(
                 feedings_updated += 1
             else:
                 feeding = FeedingSession(
-                    daily_log=log,
+                    daily_log_id=log.id,
                     feed_time=incoming.feed_time,
                     amount_kg=incoming.amount_kg,
                     additives=[],
