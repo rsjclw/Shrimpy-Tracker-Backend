@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
 from app.models import BlindFeedingTemplate, Cycle, DailyLog, FeedingSession, Grid, Pond, PopulationSample
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.schemas import (
     CycleCreate,
@@ -41,6 +41,11 @@ class BatchFeedingIn(BaseModel):
     feed_time: dtime
     amount_kg: Decimal
 
+    @field_validator("amount_kg")
+    @classmethod
+    def round_amount_kg(cls, value: Decimal) -> Decimal:
+        return round_feed_amount_kg(value)
+
 
 class BatchFeedingAbwDayIn(BaseModel):
     date: ddate
@@ -70,6 +75,7 @@ from app.services.access import (
     require_pond_permission,
 )
 from app.services.common import apply_updates, get_or_404
+from app.services.feeding_amounts import round_feed_amount_kg
 
 router = APIRouter(prefix="/cycles", tags=["cycles"])
 _BLIND_FEEDING_SESSIONS = [
@@ -105,7 +111,7 @@ async def _get_cycle_template(
 
 def _blind_feeding_amount(rate_per_100k: float, population: int) -> Decimal:
     amount = Decimal(str(rate_per_100k)) * Decimal(population) / Decimal("100000")
-    return amount.quantize(Decimal("0.001"))
+    return round_feed_amount_kg(amount)
 
 
 def _add_blind_feedings(cycle: Cycle, template: BlindFeedingTemplate) -> None:
@@ -116,7 +122,7 @@ def _add_blind_feedings(cycle: Cycle, template: BlindFeedingTemplate) -> None:
             log.feedings.append(
                 FeedingSession(
                     feed_time=feed_time,
-                    amount_kg=(total * fraction).quantize(Decimal("0.001")),
+                    amount_kg=round_feed_amount_kg(total * fraction),
                     additives=[],
                     feed_types=[],
                     notes=f"Blind feeding: {template.name} DOC {day_index + 1}",

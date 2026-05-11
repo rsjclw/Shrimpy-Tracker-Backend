@@ -2,7 +2,9 @@ import uuid
 from datetime import time as dtime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.services.feeding_amounts import round_feed_amount_kg
 
 
 class FeedingAdditive(BaseModel):
@@ -35,6 +37,11 @@ class FeedingCreate(BaseModel):
     feed_types: list[FeedingFeedType] = Field(default_factory=list)
     notes: str | None = None
 
+    @field_validator("amount_kg")
+    @classmethod
+    def round_amount_kg(cls, value: Decimal) -> Decimal:
+        return round_feed_amount_kg(value)
+
     @model_validator(mode="after")
     def validate_feed_types(self) -> "FeedingCreate":
         _validate_feed_type_percentages(self.feed_types)
@@ -48,6 +55,11 @@ class FeedingUpdate(BaseModel):
     additives: list[FeedingAdditive] | None = None
     feed_types: list[FeedingFeedType] | None = None
     notes: str | None = None
+
+    @field_validator("amount_kg")
+    @classmethod
+    def round_amount_kg(cls, value: Decimal | None) -> Decimal | None:
+        return round_feed_amount_kg(value) if value is not None else None
 
     @model_validator(mode="after")
     def validate_feed_types(self) -> "FeedingUpdate":

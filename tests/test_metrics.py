@@ -24,7 +24,8 @@ from app.services.metrics import (
     gain_fcr,
     adg_g_per_day,
 )
-from app.schemas.feeding import FeedingCreate
+from app.routers.cycles import BatchFeedingIn
+from app.schemas.feeding import FeedingCreate, FeedingUpdate
 
 
 def test_doc_for_first_day_is_one():
@@ -225,6 +226,20 @@ def test_feed_type_percentages_must_total_100_when_present():
                 }
             ],
         )
+
+
+def test_feeding_amounts_round_to_one_decimal():
+    create = FeedingCreate(feed_time=time(8, 0), amount_kg=Decimal("12.24"))
+    update = FeedingUpdate(amount_kg=Decimal("12.25"))
+
+    assert create.amount_kg == Decimal("12.2")
+    assert update.amount_kg == Decimal("12.3")
+
+
+def test_batch_feeding_amounts_round_to_one_decimal():
+    feeding = BatchFeedingIn(feed_time=time(8, 0), amount_kg=Decimal("3.26"))
+
+    assert feeding.amount_kg == Decimal("3.3")
 
 
 def test_adg_g_per_day_uses_sample_times():
