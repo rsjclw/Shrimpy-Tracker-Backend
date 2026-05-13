@@ -1,9 +1,11 @@
 from datetime import date, datetime, time
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
+from app.services import day_view
 from app.services.metrics import (
     AbwRow,
     FeedingRow,
@@ -271,3 +273,72 @@ def test_feed_between_samples_can_use_doc_one_anchor():
 
     assert feed_between_samples(feedings, previous, current) == Decimal("30")
     assert adg_g_per_day(previous, current) == Decimal("0.403")
+
+
+@pytest.mark.asyncio
+async def test_adg_trend_has_values_only_on_sampling_days(monkeypatch):
+    async def fake_gather(db, cycle):
+        return (
+            [],
+            [],
+            [AbwRow(date(2026, 5, 3), Decimal("2.0"), time(5, 0))],
+            [],
+        )
+
+    monkeypatch.setattr(day_view, "_gather", fake_gather)
+    cycle = SimpleNamespace(
+        start_date=date(2026, 5, 1),
+        initial_abw_g=Decimal("1.0"),
+        initial_population=100_000,
+    )
+
+    points = await day_view.get_trend(
+        SimpleNamespace(),
+        cycle,
+        "adg_g_per_day",
+        date(2026, 5, 1),
+        date(2026, 5, 3),
+    )
+
+    assert points[0] == (date(2026, 5, 1), None)
+    assert points[1] == (date(2026, 5, 2), None)
+    assert points[2][0] == date(2026, 5, 3)
+    assert points[2][1] is not None
+
+
+class _ScalarResult:
+    def __init__(self, values):
+        self.values = values
+
+    def all(self):
+        return self.values
+
+
+class _ExecuteResult:
+    def __init__(self, values):
+        self.values = values
+
+    def scalars(self):
+        return _ScalarResult(self.values)
+
+
+class _FakeDb:
+    def __init__(self, values):
+        self.values = values
+
+    async def execute(self, stmt):
+        return _ExecuteResult(self.values)
+
+
+@pytest.mark.asyncio
+async def test_harvest_dates_returns_logged_harvest_days_only():
+    harvest_date = date(2026, 5, 4)
+
+    result = await day_view.get_harvest_dates(
+        _FakeDb([harvest_date, harvest_date]),
+        SimpleNamespace(id="cycle-1"),
+        date(2026, 5, 1),
+        date(2026, 5, 5),
+    )
+
+    assert result == {harvest_date}

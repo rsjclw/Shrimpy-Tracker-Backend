@@ -74,6 +74,7 @@ class TrendPoint(BaseModel):
     value: Decimal | None
     is_future: bool
     is_sampling_day: bool
+    is_harvest_day: bool
 
 
 class TrendSeries(BaseModel):

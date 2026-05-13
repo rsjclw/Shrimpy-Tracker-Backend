@@ -8,7 +8,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
-from app.models import BlindFeedingTemplate, Cycle, DailyLog, FeedingSession, Grid, Pond, PopulationSample
+from app.models import (
+    BlindFeedingTemplate,
+    Cycle,
+    DailyLog,
+    FeedingSession,
+    Grid,
+    Harvest,
+    Pond,
+    PopulationSample,
+    Treatment,
+    WaterParameters,
+)
 from pydantic import BaseModel, Field, field_validator
 
 from app.schemas import (
@@ -67,7 +78,20 @@ class BatchFeedingAbwImportOut(BaseModel):
     abw_samples_written: int
 
 
-from app.services.day_view import get_day_view, get_sampling_dates, get_trend, list_day_summaries
+class PredictionBaselineOut(BaseModel):
+    previous_biomass_kg: Decimal
+    feed_since_previous_sample_start_kg: Decimal
+    estimated_population: int
+
+
+from app.services.day_view import (
+    get_day_view,
+    get_harvest_dates,
+    get_prediction_baseline,
+    get_sampling_dates,
+    get_trend,
+    list_day_summaries,
+)
 from app.services.access import (
     accessible_farm_ids,
     require_cycle_permission,
@@ -283,11 +307,31 @@ async def get_cycle_trend(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     today = datetime.now(timezone.utc).date()
     sampling_dates = await get_sampling_dates(db, cycle, date_from, date_to)
+    harvest_dates = await get_harvest_dates(db, cycle, date_from, date_to)
     points = [
-        TrendPoint(date=d, value=v, is_future=d > today, is_sampling_day=d in sampling_dates)
+        TrendPoint(
+            date=d,
+            value=v,
+            is_future=d > today,
+            is_sampling_day=d in sampling_dates,
+            is_harvest_day=d in harvest_dates,
+        )
         for d, v in raw
     ]
     return TrendSeries(metric=metric, points=points)
+
+
+@router.get("/{cycle_id}/prediction-baseline", response_model=PredictionBaselineOut)
+async def get_cycle_prediction_baseline(
+    cycle_id: UUID,
+    start_date: ddate = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionBaselineOut:
+    await require_cycle_permission(db, user, cycle_id)
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    baseline = await get_prediction_baseline(db, cycle, start_date)
+    return PredictionBaselineOut(**baseline)
 
 
 @router.post("/{cycle_id}/batch-import/feedings-abw", response_model=BatchFeedingAbwImportOut)
@@ -309,6 +353,33 @@ async def batch_import_feedings_abw(
         )
 
     target_dates = {day.date for day in payload.days}
+    first_target_date = min(target_dates)
+    feedings_deleted = 0
+
+    if payload.replace_feedings:
+        existing_result = await db.execute(
+            select(DailyLog.id).where(
+                DailyLog.cycle_id == cycle_id,
+                DailyLog.date >= first_target_date,
+            )
+        )
+        existing_log_ids = list(existing_result.scalars().all())
+        if existing_log_ids:
+            delete_result = await db.execute(
+                delete(FeedingSession).where(FeedingSession.daily_log_id.in_(existing_log_ids))
+            )
+            feedings_deleted = delete_result.rowcount or 0
+            await db.execute(delete(WaterParameters).where(WaterParameters.daily_log_id.in_(existing_log_ids)))
+            await db.execute(delete(Harvest).where(Harvest.daily_log_id.in_(existing_log_ids)))
+            await db.execute(delete(Treatment).where(Treatment.daily_log_id.in_(existing_log_ids)))
+            await db.execute(delete(DailyLog).where(DailyLog.id.in_(existing_log_ids)))
+        await db.execute(
+            delete(PopulationSample).where(
+                PopulationSample.cycle_id == cycle_id,
+                PopulationSample.date >= first_target_date,
+            )
+        )
+
     result = await db.execute(
         select(DailyLog)
         .where(DailyLog.cycle_id == cycle_id, DailyLog.date.in_(target_dates))
@@ -317,7 +388,6 @@ async def batch_import_feedings_abw(
 
     feedings_created = 0
     feedings_updated = 0
-    feedings_deleted = 0
     abw_samples_written = 0
 
     for day in payload.days:
@@ -337,7 +407,7 @@ async def batch_import_feedings_abw(
             delete_result = await db.execute(
                 delete(FeedingSession).where(FeedingSession.daily_log_id.in_(log_ids))
             )
-            feedings_deleted = delete_result.rowcount or 0
+            feedings_deleted += delete_result.rowcount or 0
     elif log_ids:
         feedings_result = await db.execute(
             select(FeedingSession).where(FeedingSession.daily_log_id.in_(log_ids))

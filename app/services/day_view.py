@@ -3,6 +3,7 @@
 Centralizes the joining of raw rows + metric computation so routers stay thin.
 """
 from datetime import date as ddate
+from datetime import datetime
 from datetime import time as dtime
 from decimal import Decimal
 
@@ -152,6 +153,36 @@ def _compute_sampling_metrics(
         feed_since_previous_sample_kg=period_feed,
         sample_fcr=sample_fcr,
     )
+
+
+async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate) -> dict[str, Decimal | int]:
+    """Return the sample-FCR baseline that remains after prediction clears target onward."""
+    feedings, samples, abw_history, harvests = await _gather(db, cycle)
+    target_start = datetime.combine(target, dtime(0, 0))
+
+    previous_samples = [a for a in abw_history if a.sampled_at < target_start]
+    previous = (
+        max(previous_samples, key=lambda a: a.sampled_at)
+        if previous_samples
+        else M.AbwRow(date=cycle.start_date, abw_g=cycle.initial_abw_g, sample_time=dtime(0, 0))
+    )
+
+    retained_samples = [s for s in samples if s.date < target]
+    retained_harvests = [h for h in harvests if h.harvested_at < target_start]
+    previous_pop = M.estimated_population_at(
+        cycle.initial_population, retained_samples, retained_harvests, previous.sampled_at
+    )
+    prediction_pop = M.estimated_population_at(
+        cycle.initial_population, retained_samples, retained_harvests, target_start
+    )
+
+    return {
+        "previous_biomass_kg": M.estimated_biomass_kg(previous_pop, previous.abw_g),
+        "feed_since_previous_sample_start_kg": M.feed_between_datetimes(
+            feedings, previous.sampled_at, target_start
+        ),
+        "estimated_population": prediction_pop,
+    }
 
 
 async def _default_feed_types(db: AsyncSession, cycle: Cycle, target: ddate) -> list[FeedingFeedType]:
@@ -312,7 +343,11 @@ async def get_trend(
     date_from: ddate,
     date_to: ddate,
 ) -> list[tuple[ddate, Decimal | None]]:
-    if metric not in METRIC_EXTRACTORS and metric not in WATER_METRICS and metric != "sample_fcr":
+    if (
+        metric not in METRIC_EXTRACTORS
+        and metric not in WATER_METRICS
+        and metric not in {"sample_fcr", "adg_g_per_day"}
+    ):
         raise ValueError(f"Unknown metric: {metric}")
 
     points: list[tuple[ddate, Decimal | None]] = []
@@ -336,13 +371,18 @@ async def get_trend(
 
     feedings_all, samples, abw_history, harvests_all = await _gather(db, cycle)
 
-    if metric == "sample_fcr":
+    if metric in {"sample_fcr", "adg_g_per_day"}:
         current = date_from
         while current <= date_to:
             sampling = _compute_sampling_metrics(
                 current, feedings_all, samples, abw_history, harvests_all, cycle
             )
-            points.append((current, sampling.sample_fcr))
+            value = (
+                sampling.adg_g_per_day
+                if metric == "adg_g_per_day"
+                else sampling.sample_fcr
+            )
+            points.append((current, value))
             current = ddate.fromordinal(current.toordinal() + 1)
         return points
 
@@ -368,6 +408,24 @@ async def get_sampling_dates(
             DailyLog.date >= date_from,
             DailyLog.date <= date_to,
             DailyLog.abw_g.is_not(None),
+        )
+    )
+    return set(result.scalars().all())
+
+
+async def get_harvest_dates(
+    db: AsyncSession,
+    cycle: Cycle,
+    date_from: ddate,
+    date_to: ddate,
+) -> set[ddate]:
+    result = await db.execute(
+        select(DailyLog.date)
+        .join(Harvest, Harvest.daily_log_id == DailyLog.id)
+        .where(
+            DailyLog.cycle_id == cycle.id,
+            DailyLog.date >= date_from,
+            DailyLog.date <= date_to,
         )
     )
     return set(result.scalars().all())
