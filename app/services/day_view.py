@@ -3,7 +3,7 @@
 Centralizes the joining of raw rows + metric computation so routers stay thin.
 """
 from datetime import date as ddate
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import time as dtime
 from decimal import Decimal
 
@@ -90,6 +90,8 @@ def _compute_metrics(
     cumulative_end = M.cumulative_feed_kg(feedings, target)
     pop = M.estimated_population_end_of_day(cycle.initial_population, samples, harvests, target)
     abw = M.estimated_abw_g(cycle.initial_abw_g, feedings, abw_history, target)
+    abw_yesterday = M.estimated_abw_g(cycle.initial_abw_g, feedings, abw_history, target - timedelta(days=1))
+    estimated_adg = (abw - abw_yesterday).quantize(Decimal("0.0001")) if abw is not None and abw_yesterday is not None else None
     biomass = M.estimated_biomass_kg(pop, abw)
     harvested = M.harvest_biomass_kg(harvests, target)
     cumulative_harvested = M.cumulative_harvest_biomass_kg(harvests, target)
@@ -102,6 +104,7 @@ def _compute_metrics(
         cumulative_feed_start_kg=cumulative_start,
         cumulative_feed_end_kg=cumulative_end,
         abw_g=abw,
+        estimated_adg_g_per_day=estimated_adg,
         estimated_population=pop,
         estimated_biomass_kg=biomass,
         harvest_biomass_kg=harvested,
@@ -319,6 +322,7 @@ METRIC_EXTRACTORS = {
     "cumulative_feed_start_kg": lambda m: m.cumulative_feed_start_kg,
     "cumulative_feed_end_kg": lambda m: m.cumulative_feed_end_kg,
     "abw_g": lambda m: m.abw_g,
+    "adg_g_per_day": lambda m: m.estimated_adg_g_per_day,
     "estimated_population": lambda m: Decimal(m.estimated_population) if m.estimated_population is not None else None,
     "estimated_biomass_kg": lambda m: m.estimated_biomass_kg,
     "harvest_biomass_kg": lambda m: m.harvest_biomass_kg,
@@ -350,7 +354,7 @@ async def get_trend(
     if (
         metric not in METRIC_EXTRACTORS
         and metric not in WATER_METRICS
-        and metric not in {"sample_fcr", "adg_g_per_day"}
+        and metric not in {"sample_fcr"}
     ):
         raise ValueError(f"Unknown metric: {metric}")
 
@@ -375,17 +379,13 @@ async def get_trend(
 
     feedings_all, samples, abw_history, harvests_all = await _gather(db, cycle)
 
-    if metric in {"sample_fcr", "adg_g_per_day"}:
+    if metric in {"sample_fcr"}:
         current = date_from
         while current <= date_to:
             sampling = _compute_sampling_metrics(
                 current, feedings_all, samples, abw_history, harvests_all, cycle
             )
-            value = (
-                sampling.adg_g_per_day
-                if metric == "adg_g_per_day"
-                else sampling.sample_fcr
-            )
+            value = sampling.sample_fcr
             points.append((current, value))
             current = ddate.fromordinal(current.toordinal() + 1)
         return points

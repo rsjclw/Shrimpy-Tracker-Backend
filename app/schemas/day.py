@@ -25,6 +25,7 @@ class DayMetrics(BaseModel):
     cumulative_feed_start_kg: Decimal
     cumulative_feed_end_kg: Decimal
     abw_g: Decimal | None
+    estimated_adg_g_per_day: Decimal | None
     estimated_population: int | None
     estimated_biomass_kg: Decimal | None
     harvest_biomass_kg: Decimal
