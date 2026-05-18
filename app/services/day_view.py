@@ -175,6 +175,9 @@ async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate)
     prediction_pop = M.estimated_population_at(
         cycle.initial_population, retained_samples, retained_harvests, target_start
     )
+    period_harvested_biomass = M.harvest_biomass_between_datetimes(
+        harvests, previous.sampled_at, target_start
+    )
 
     return {
         "previous_biomass_kg": M.estimated_biomass_kg(previous_pop, previous.abw_g),
@@ -182,6 +185,7 @@ async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate)
             feedings, previous.sampled_at, target_start
         ),
         "estimated_population": prediction_pop,
+        "harvested_biomass_since_previous_sample_kg": period_harvested_biomass,
     }
 
 
