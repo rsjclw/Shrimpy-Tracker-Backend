@@ -21,6 +21,7 @@ class DailyLogUpdate(BaseModel):
 class DayMetrics(BaseModel):
     doc: int
     daily_feed_kg: Decimal
+    feeding_index: Decimal | None
     cumulative_feed_kg: Decimal
     cumulative_feed_start_kg: Decimal
     cumulative_feed_end_kg: Decimal

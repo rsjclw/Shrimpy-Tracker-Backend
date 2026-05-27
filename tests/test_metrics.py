@@ -276,7 +276,7 @@ def test_feed_between_samples_can_use_doc_one_anchor():
 
 
 @pytest.mark.asyncio
-async def test_adg_trend_has_values_only_on_sampling_days(monkeypatch):
+async def test_adg_trend_uses_estimated_daily_gain(monkeypatch):
     async def fake_gather(db, cycle):
         return (
             [],
@@ -300,10 +300,42 @@ async def test_adg_trend_has_values_only_on_sampling_days(monkeypatch):
         date(2026, 5, 3),
     )
 
-    assert points[0] == (date(2026, 5, 1), None)
-    assert points[1] == (date(2026, 5, 2), None)
-    assert points[2][0] == date(2026, 5, 3)
-    assert points[2][1] is not None
+    assert points == [
+        (date(2026, 5, 1), Decimal("0.0000")),
+        (date(2026, 5, 2), Decimal("0.0000")),
+        (date(2026, 5, 3), Decimal("1.0000")),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_feeding_index_trend_matches_daily_feed_population_and_doc(monkeypatch):
+    async def fake_gather(db, cycle):
+        return (
+            [FeedingRow(date(2026, 5, 10), Decimal("15.0"), time(8, 0))],
+            [],
+            [],
+            [],
+        )
+
+    monkeypatch.setattr(day_view, "_gather", fake_gather)
+    cycle = SimpleNamespace(
+        start_date=date(2026, 5, 1),
+        initial_abw_g=Decimal("1.0"),
+        initial_population=100_000,
+    )
+
+    points = await day_view.get_trend(
+        SimpleNamespace(),
+        cycle,
+        "feeding_index",
+        date(2026, 5, 9),
+        date(2026, 5, 10),
+    )
+
+    assert points == [
+        (date(2026, 5, 9), None),
+        (date(2026, 5, 10), Decimal("1.5000")),
+    ]
 
 
 class _ScalarResult:

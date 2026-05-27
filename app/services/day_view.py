@@ -26,6 +26,14 @@ from app.schemas import (
 from app.services import metrics as M
 
 
+def _feeding_index(daily_feed_kg: Decimal, doc: int, population: int | None) -> Decimal | None:
+    if daily_feed_kg <= 0 or doc < 1 or population is None or population <= 0:
+        return None
+
+    value = (daily_feed_kg / (Decimal(population) / Decimal("100000"))) / Decimal(doc)
+    return value.quantize(Decimal("0.0001"))
+
+
 async def _gather(db: AsyncSession, cycle: Cycle) -> tuple[
     list[M.FeedingRow],
     list[M.SampleRow],
@@ -85,6 +93,7 @@ def _compute_metrics(
     abw_history: list[M.AbwRow],
     harvests: list[M.HarvestRow],
 ) -> DayMetrics:
+    doc = M.doc_for(cycle.start_date, target)
     daily = M.daily_feed_kg(feedings, target)
     cumulative_start = M.cumulative_feed_before_date(feedings, target)
     cumulative_end = M.cumulative_feed_kg(feedings, target)
@@ -98,8 +107,9 @@ def _compute_metrics(
     fcr_value = M.fcr(cumulative_end, biomass, cumulative_harvested)
 
     return DayMetrics(
-        doc=M.doc_for(cycle.start_date, target),
+        doc=doc,
         daily_feed_kg=daily,
+        feeding_index=_feeding_index(daily, doc, pop),
         cumulative_feed_kg=cumulative_start,
         cumulative_feed_start_kg=cumulative_start,
         cumulative_feed_end_kg=cumulative_end,
@@ -318,6 +328,7 @@ async def list_day_summaries(
 
 METRIC_EXTRACTORS = {
     "daily_feed_kg": lambda m: m.daily_feed_kg,
+    "feeding_index": lambda m: m.feeding_index,
     "cumulative_feed_kg": lambda m: m.cumulative_feed_kg,
     "cumulative_feed_start_kg": lambda m: m.cumulative_feed_start_kg,
     "cumulative_feed_end_kg": lambda m: m.cumulative_feed_end_kg,
