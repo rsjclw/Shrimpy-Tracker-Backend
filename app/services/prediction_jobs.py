@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
@@ -26,6 +27,7 @@ class PredictionJob:
 
 
 _jobs: dict[UUID, PredictionJob] = {}
+ACTIVE_STATUSES = {"pending", "running", "completed"}
 
 
 def _touch(job: PredictionJob) -> None:
@@ -37,7 +39,7 @@ def _prune_finished_jobs() -> None:
     old_job_ids = [
         job_id
         for job_id, job in _jobs.items()
-        if job.status in {"completed", "failed"} and job.updated_at.timestamp() < cutoff
+        if job.status in {"completed", "failed", "applied"} and job.updated_at.timestamp() < cutoff
     ]
     for job_id in old_job_ids:
         _jobs.pop(job_id, None)
@@ -47,6 +49,7 @@ async def _run_preview_job(job_id: UUID) -> None:
     job = _jobs[job_id]
     job.status = "running"
     _touch(job)
+    heartbeat_task = asyncio.create_task(_heartbeat(job))
     try:
         async with SessionLocal() as db:
             cycle = await db.get(Cycle, job.cycle_id)
@@ -68,7 +71,17 @@ async def _run_preview_job(job_id: UUID) -> None:
         job.status = "failed"
         job.error = "Prediction failed."
     finally:
+        heartbeat_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await heartbeat_task
         _touch(job)
+
+
+async def _heartbeat(job: PredictionJob) -> None:
+    while job.status == "running":
+        await asyncio.sleep(2)
+        if job.status == "running":
+            _touch(job)
 
 
 def start_prediction_job(cycle_id: UUID, user_id: str, request: PredictionRequest) -> PredictionJob:
@@ -83,4 +96,24 @@ def get_prediction_job(job_id: UUID, cycle_id: UUID, user_id: str) -> Prediction
     job = _jobs.get(job_id)
     if job is None or job.cycle_id != cycle_id or job.user_id != user_id:
         return None
+    return job
+
+
+def get_latest_active_prediction_job(cycle_id: UUID, user_id: str) -> PredictionJob | None:
+    _prune_finished_jobs()
+    candidates = [
+        job
+        for job in _jobs.values()
+        if job.cycle_id == cycle_id
+        and job.user_id == user_id
+        and job.status in ACTIVE_STATUSES
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda job: job.created_at)
+
+
+def mark_prediction_job_applied(job: PredictionJob) -> PredictionJob:
+    job.status = "applied"
+    _touch(job)
     return job

@@ -107,7 +107,12 @@ from app.services.access import (
 from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
-from app.services.prediction_jobs import get_prediction_job, start_prediction_job
+from app.services.prediction_jobs import (
+    get_latest_active_prediction_job,
+    get_prediction_job,
+    mark_prediction_job_applied,
+    start_prediction_job,
+)
 
 router = APIRouter(prefix="/cycles", tags=["cycles"])
 _BLIND_FEEDING_SESSIONS = [
@@ -384,6 +389,16 @@ async def start_cycle_prediction_preview_job(
     return start_prediction_job(cycle_id, user.id, payload)
 
 
+@router.get("/{cycle_id}/prediction/preview-jobs/latest", response_model=PredictionJobOut | None)
+async def get_latest_cycle_prediction_preview_job(
+    cycle_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionJobOut | None:
+    await require_cycle_permission(db, user, cycle_id)
+    return get_latest_active_prediction_job(cycle_id, user.id)
+
+
 @router.get("/{cycle_id}/prediction/preview-jobs/{job_id}", response_model=PredictionJobOut)
 async def get_cycle_prediction_preview_job(
     cycle_id: UUID,
@@ -412,7 +427,9 @@ async def generate_cycle_prediction_from_preview_job(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Prediction job not found")
     if job.status != "completed" or job.result is None:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "Prediction job is not complete")
-    return await apply_prediction_result(db, cycle, job.result)
+    result = await apply_prediction_result(db, cycle, job.result)
+    mark_prediction_job_applied(job)
+    return result
 
 
 @router.post("/{cycle_id}/prediction/generate", response_model=PredictionResultOut)
