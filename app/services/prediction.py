@@ -23,7 +23,7 @@ from app.services.day_view import get_prediction_baseline
 from app.services.feeding_amounts import round_feed_amount_kg
 
 PARTIAL_HARVEST_STEP_KG = 25
-MAX_OPTIMIZER_STATES_PER_DOC = 5000
+MAX_OPTIMIZER_STATES_PER_DOC = 1000
 HARVEST_TIME = dtime(5, 0)
 FEEDING_SPLIT = (
     (dtime(6, 0), Decimal("0.25")),
@@ -193,7 +193,6 @@ class OptimizerState:
     partial_revenue: float
     partial_harvest_cost: float
     stable_locked: bool
-    daily_results: tuple[DailyResult, ...]
     partial_harvests: tuple[PartialHarvestEvent, ...]
 
 
@@ -297,6 +296,7 @@ def run_daily_step(
     day_start_population: float | None = None,
     day_start_biomass_kg: float | None = None,
     partial_event: PartialHarvestEvent | None = None,
+    build_row: bool = True,
 ):
     day_start_population = population if day_start_population is None else day_start_population
     day_start_biomass_kg = biomass_kg if day_start_biomass_kg is None else day_start_biomass_kg
@@ -335,25 +335,27 @@ def run_daily_step(
     elif ending_abw_g >= config.maximum_shrimp_size_g:
         day_stop_reason = "maximum_shrimp_size"
 
-    row = DailyResult(
-        doc=doc,
-        starting_population=day_start_population,
-        ending_population=population,
-        feed=feed,
-        feeding_index=feeding_index,
-        starting_abw_g=starting_abw_g,
-        ending_abw_g=ending_abw_g,
-        starting_biomass_kg=day_start_biomass_kg,
-        ending_biomass_kg=biomass_kg,
-        actual_feed_kg=actual_feed_kg,
-        cumulative_feed_kg=cumulative_feed_kg,
-        count_size=count_size,
-        harvest_price_per_kg=harvest_price_per_kg,
-        partial_event=partial_event,
-        stable_locked=stable_locked_after_day,
-        feed_cost=daily_feed_cost,
-        stop_reason=day_stop_reason,
-    )
+    row = None
+    if build_row:
+        row = DailyResult(
+            doc=doc,
+            starting_population=day_start_population,
+            ending_population=population,
+            feed=feed,
+            feeding_index=feeding_index,
+            starting_abw_g=starting_abw_g,
+            ending_abw_g=ending_abw_g,
+            starting_biomass_kg=day_start_biomass_kg,
+            ending_biomass_kg=biomass_kg,
+            actual_feed_kg=actual_feed_kg,
+            cumulative_feed_kg=cumulative_feed_kg,
+            count_size=count_size,
+            harvest_price_per_kg=harvest_price_per_kg,
+            partial_event=partial_event,
+            stable_locked=stable_locked_after_day,
+            feed_cost=daily_feed_cost,
+            stop_reason=day_stop_reason,
+        )
     return population, biomass_kg, cumulative_feed_kg, simulated_feed_kg, feed_cost, row, day_stop_reason, stable_locked_after_day
 
 
@@ -401,6 +403,7 @@ def finalize_simulation(
     partial_harvests: tuple[PartialHarvestEvent, ...],
     daily_results: tuple[DailyResult, ...],
     stop_reason: str,
+    production_day_count: int | None = None,
 ) -> SimulationResult:
     final_abw_g = biomass_kg * 1000 / population
     harvest_count_size = 1000 / final_abw_g
@@ -408,7 +411,8 @@ def finalize_simulation(
     final_revenue = biomass_kg * harvest_price_per_kg
     total_revenue = partial_revenue + final_revenue
     total_harvest_event_cost = partial_harvest_cost + config.harvest_fixed_cost_per_event
-    total_costs = config.past_cost + feed_cost + daily_cost_totals(config, len(daily_results)) + total_harvest_event_cost
+    day_count = len(daily_results) if production_day_count is None else production_day_count
+    total_costs = config.past_cost + feed_cost + daily_cost_totals(config, day_count) + total_harvest_event_cost
     profit = total_revenue - total_costs
     profit_per_day = profit / max(config.preparation_day + final_doc, 1)
     return SimulationResult(
@@ -553,6 +557,74 @@ def simulate(config: Config) -> SimulationResult:
     raise PredictionError("prediction produced no daily rows")
 
 
+def simulate_with_partial_harvests(
+    config: Config,
+    scheduled_partial_harvests: tuple[PartialHarvestEvent, ...],
+) -> SimulationResult:
+    population = config.starting_population
+    biomass_kg = population * config.initial_abw_g / 1000
+    cumulative_feed_kg = config.initial_cumulative_feed_kg
+    simulated_feed_kg = 0
+    feed_cost = 0
+    partial_revenue = 0
+    partial_harvest_cost = 0
+    stable_locked = biomass_kg >= stable_capacity_kg(config)
+    stable_capacity_limit_kg = stable_capacity_kg(config)
+    partial_harvests: tuple[PartialHarvestEvent, ...] = ()
+    daily_results: tuple[DailyResult, ...] = ()
+    scheduled_by_doc = {
+        event.doc: event.kg_harvested
+        for event in scheduled_partial_harvests
+    }
+
+    for doc in range(config.start_doc, config.final_doc + 1):
+        if doc == config.final_doc:
+            row = terminal_day(config, doc, population, biomass_kg, cumulative_feed_kg, stable_locked)
+            daily_results += (row,)
+            return finalize_simulation(
+                config, doc, population, biomass_kg, cumulative_feed_kg, simulated_feed_kg,
+                feed_cost, partial_revenue, partial_harvest_cost, partial_harvests, daily_results, "final_doc"
+            )
+
+        state_stable_locked = stable_locked or biomass_kg >= stable_capacity_limit_kg
+        day_start_population = population
+        day_start_biomass_kg = biomass_kg
+        partial_event = None
+        harvest_kg = scheduled_by_doc.get(doc)
+        if harvest_kg is not None:
+            applied = apply_partial_harvest(config, doc, population, biomass_kg, harvest_kg)
+            if applied is None:
+                raise PredictionError("optimized partial harvest could not be replayed")
+            population, biomass_kg, partial_event = applied
+            partial_revenue += partial_event.revenue
+            partial_harvest_cost += partial_event.fixed_cost
+            partial_harvests += (partial_event,)
+
+        population, biomass_kg, cumulative_feed_kg, simulated_feed_kg, feed_cost, row, stop_reason, stable_locked = run_daily_step(
+            config,
+            doc,
+            population,
+            biomass_kg,
+            cumulative_feed_kg,
+            simulated_feed_kg,
+            feed_cost,
+            state_stable_locked,
+            day_start_population=day_start_population,
+            day_start_biomass_kg=day_start_biomass_kg,
+            partial_event=partial_event,
+        )
+        if row is None:
+            raise PredictionError("prediction produced no daily row")
+        daily_results += (row,)
+        if stop_reason:
+            return finalize_simulation(
+                config, doc, population, biomass_kg, cumulative_feed_kg, simulated_feed_kg,
+                feed_cost, partial_revenue, partial_harvest_cost, partial_harvests, daily_results, stop_reason
+            )
+
+    raise PredictionError("prediction produced no daily rows")
+
+
 def optimize_partial_harvests(config: Config) -> SimulationResult:
     population = config.starting_population
     biomass_kg = population * config.initial_abw_g / 1000
@@ -567,7 +639,6 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
             partial_revenue=0,
             partial_harvest_cost=0,
             stable_locked=biomass_kg >= stable_capacity_kg(config),
-            daily_results=(),
             partial_harvests=(),
         )
     ]
@@ -577,9 +648,6 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
     for doc in range(config.start_doc, config.final_doc + 1):
         if doc == config.final_doc:
             for state in states:
-                row = terminal_day(
-                    config, doc, state.population, state.biomass_kg, state.cumulative_feed_kg, state.stable_locked
-                )
                 candidate = finalize_simulation(
                     config=config,
                     final_doc=doc,
@@ -591,8 +659,9 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
                     partial_revenue=state.partial_revenue,
                     partial_harvest_cost=state.partial_harvest_cost,
                     partial_harvests=state.partial_harvests,
-                    daily_results=state.daily_results + (row,),
+                    daily_results=(),
                     stop_reason="final_doc",
+                    production_day_count=doc - config.start_doc + 1,
                 )
                 if better_result(candidate, best):
                     best = candidate
@@ -637,6 +706,7 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
                     day_start_population=day_start_population,
                     day_start_biomass_kg=day_start_biomass_kg,
                     partial_event=partial_event,
+                    build_row=False,
                 )
 
                 if day_stop_reason:
@@ -651,8 +721,9 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
                         partial_revenue=partial_revenue,
                         partial_harvest_cost=partial_harvest_cost,
                         partial_harvests=partial_harvests,
-                        daily_results=state.daily_results + (daily_result,),
+                        daily_results=(),
                         stop_reason=day_stop_reason,
+                        production_day_count=doc - config.start_doc + 1,
                     )
                     if better_result(candidate, best):
                         best = candidate
@@ -680,7 +751,6 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
                             partial_revenue=partial_revenue,
                             partial_harvest_cost=partial_harvest_cost,
                             stable_locked=next_stable_locked,
-                            daily_results=state.daily_results + (daily_result,),
                             partial_harvests=partial_harvests,
                         )
                         next_rank_by_bucket[key] = rank
@@ -688,7 +758,9 @@ def optimize_partial_harvests(config: Config) -> SimulationResult:
         if not states:
             break
 
-    return best or simulate(config)
+    if best is None:
+        return simulate(config)
+    return simulate_with_partial_harvests(config, tuple(best.partial_harvests))
 
 
 async def _farm_and_area(db: AsyncSession, cycle: Cycle) -> tuple[UUID, Decimal]:

@@ -28,6 +28,8 @@ class PredictionJob:
 
 _jobs: dict[UUID, PredictionJob] = {}
 ACTIVE_STATUSES = {"pending", "running", "completed"}
+RUNNING_STATUSES = {"pending", "running"}
+_preview_semaphore = asyncio.Semaphore(1)
 
 
 def _touch(job: PredictionJob) -> None:
@@ -51,17 +53,18 @@ async def _run_preview_job(job_id: UUID) -> None:
     _touch(job)
     heartbeat_task = asyncio.create_task(_heartbeat(job))
     try:
-        async with SessionLocal() as db:
-            cycle = await db.get(Cycle, job.cycle_id)
-            if cycle is None:
-                raise PredictionError("Cycle not found")
-            job.result = await preview_prediction(
-                db,
-                cycle,
-                job.request.start_date,
-                job.request.target_doc,
-                job.request.optimize_partial_harvests,
-            )
+        async with _preview_semaphore:
+            async with SessionLocal() as db:
+                cycle = await db.get(Cycle, job.cycle_id)
+                if cycle is None:
+                    raise PredictionError("Cycle not found")
+                job.result = await preview_prediction(
+                    db,
+                    cycle,
+                    job.request.start_date,
+                    job.request.target_doc,
+                    job.request.optimize_partial_harvests,
+                )
         job.status = "completed"
     except PredictionError as error:
         job.status = "failed"
@@ -86,6 +89,10 @@ async def _heartbeat(job: PredictionJob) -> None:
 
 def start_prediction_job(cycle_id: UUID, user_id: str, request: PredictionRequest) -> PredictionJob:
     _prune_finished_jobs()
+    existing_job = get_latest_prediction_job(cycle_id, user_id, RUNNING_STATUSES)
+    if existing_job is not None:
+        _touch(existing_job)
+        return existing_job
     job = PredictionJob(id=uuid4(), cycle_id=cycle_id, user_id=user_id, request=request)
     _jobs[job.id] = job
     asyncio.create_task(_run_preview_job(job.id))
@@ -99,18 +106,22 @@ def get_prediction_job(job_id: UUID, cycle_id: UUID, user_id: str) -> Prediction
     return job
 
 
-def get_latest_active_prediction_job(cycle_id: UUID, user_id: str) -> PredictionJob | None:
+def get_latest_prediction_job(cycle_id: UUID, user_id: str, statuses: set[str]) -> PredictionJob | None:
     _prune_finished_jobs()
     candidates = [
         job
         for job in _jobs.values()
         if job.cycle_id == cycle_id
         and job.user_id == user_id
-        and job.status in ACTIVE_STATUSES
+        and job.status in statuses
     ]
     if not candidates:
         return None
     return max(candidates, key=lambda job: job.created_at)
+
+
+def get_latest_active_prediction_job(cycle_id: UUID, user_id: str) -> PredictionJob | None:
+    return get_latest_prediction_job(cycle_id, user_id, ACTIVE_STATUSES)
 
 
 def mark_prediction_job_applied(job: PredictionJob) -> PredictionJob:
