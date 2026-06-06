@@ -1,8 +1,9 @@
 from datetime import date as ddate
-from datetime import time as dtime
+from datetime import datetime, time as dtime
 from decimal import Decimal
+import uuid
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.feeding import FeedingFeedType
 
@@ -82,3 +83,14 @@ class PredictionResultOut(BaseModel):
     daily_rows: list[PredictionDailyRowOut]
     partial_harvests: list[PredictionPartialHarvestOut]
     generated: PredictionGeneratedCounts | None = None
+
+
+class PredictionJobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    status: str
+    error: str | None
+    result: PredictionResultOut | None
+    created_at: datetime
+    updated_at: datetime

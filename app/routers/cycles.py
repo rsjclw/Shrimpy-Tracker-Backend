@@ -31,6 +31,7 @@ from app.schemas import (
     PopulationSampleCreate,
     PopulationSampleOut,
     PredictionConfig,
+    PredictionJobOut,
     PredictionRequest,
     PredictionResultOut,
     TrendPoint,
@@ -105,7 +106,8 @@ from app.services.access import (
 )
 from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
-from app.services.prediction import PredictionError, generate_prediction, preview_prediction
+from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
+from app.services.prediction_jobs import get_prediction_job, start_prediction_job
 
 router = APIRouter(prefix="/cycles", tags=["cycles"])
 _BLIND_FEEDING_SESSIONS = [
@@ -368,6 +370,49 @@ async def preview_cycle_prediction(
         )
     except PredictionError as error:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error))
+
+
+@router.post("/{cycle_id}/prediction/preview-jobs", response_model=PredictionJobOut)
+async def start_cycle_prediction_preview_job(
+    cycle_id: UUID,
+    payload: PredictionRequest,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionJobOut:
+    await require_cycle_permission(db, user, cycle_id)
+    await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    return start_prediction_job(cycle_id, user.id, payload)
+
+
+@router.get("/{cycle_id}/prediction/preview-jobs/{job_id}", response_model=PredictionJobOut)
+async def get_cycle_prediction_preview_job(
+    cycle_id: UUID,
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionJobOut:
+    await require_cycle_permission(db, user, cycle_id)
+    job = get_prediction_job(job_id, cycle_id, user.id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Prediction job not found")
+    return job
+
+
+@router.post("/{cycle_id}/prediction/preview-jobs/{job_id}/generate", response_model=PredictionResultOut)
+async def generate_cycle_prediction_from_preview_job(
+    cycle_id: UUID,
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionResultOut:
+    await require_cycle_permission(db, user, cycle_id, "manage")
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    job = get_prediction_job(job_id, cycle_id, user.id)
+    if job is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Prediction job not found")
+    if job.status != "completed" or job.result is None:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Prediction job is not complete")
+    return await apply_prediction_result(db, cycle, job.result)
 
 
 @router.post("/{cycle_id}/prediction/generate", response_model=PredictionResultOut)

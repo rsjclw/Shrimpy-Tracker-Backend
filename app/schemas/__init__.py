@@ -30,6 +30,7 @@ from app.schemas.harvest import HarvestCreate, HarvestOut, HarvestUpdate
 from app.schemas.pond import PondCreate, PondOut, PondUpdate
 from app.schemas.prediction import (
     PredictionGeneratedCounts,
+    PredictionJobOut,
     PredictionRequest,
     PredictionResultOut,
 )
@@ -87,4 +88,5 @@ __all__ = [
     "PredictionRequest",
     "PredictionResultOut",
     "PredictionGeneratedCounts",
+    "PredictionJobOut",
 ]

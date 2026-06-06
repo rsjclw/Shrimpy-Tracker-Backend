@@ -22,8 +22,8 @@ from app.schemas.prediction import (
 from app.services.day_view import get_prediction_baseline
 from app.services.feeding_amounts import round_feed_amount_kg
 
-PARTIAL_HARVEST_STEP_KG = 50
-MAX_OPTIMIZER_STATES_PER_DOC = 500
+PARTIAL_HARVEST_STEP_KG = 25
+MAX_OPTIMIZER_STATES_PER_DOC = 5000
 HARVEST_TIME = dtime(5, 0)
 FEEDING_SPLIT = (
     (dtime(6, 0), Decimal("0.25")),
@@ -970,6 +970,14 @@ async def generate_prediction(
     optimize: bool,
 ) -> PredictionResultOut:
     preview = await preview_prediction(db, cycle, start_date, target_doc, optimize)
+    return await apply_prediction_result(db, cycle, preview)
+
+
+async def apply_prediction_result(
+    db: AsyncSession,
+    cycle: Cycle,
+    preview: PredictionResultOut,
+) -> PredictionResultOut:
     target_dates = {row.date for row in preview.daily_rows}
     first_target_date = min(target_dates)
 
