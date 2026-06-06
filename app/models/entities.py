@@ -109,6 +109,7 @@ class Cycle(Base):
         UUID(as_uuid=True), ForeignKey("blind_feeding_templates.id", ondelete="SET NULL")
     )
     blind_feeding_target_abw_g: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
+    prediction_config: Mapped[dict | None] = mapped_column(JSONB)
 
     pond: Mapped[Pond] = relationship(back_populates="cycles")
     daily_logs: Mapped[list["DailyLog"]] = relationship(

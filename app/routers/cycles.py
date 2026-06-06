@@ -30,6 +30,9 @@ from app.schemas import (
     DayView,
     PopulationSampleCreate,
     PopulationSampleOut,
+    PredictionConfig,
+    PredictionRequest,
+    PredictionResultOut,
     TrendPoint,
     TrendSeries,
 )
@@ -45,6 +48,7 @@ class CycleUpdate(BaseModel):
     final_carrying_capacity_kg_per_m3: Decimal | None = None
     feeding_index_increment: Decimal | None = None
     maximum_feeding_index: Decimal | None = None
+    prediction_config: PredictionConfig | None = None
     notes: str | None = None
 
 
@@ -99,8 +103,9 @@ from app.services.access import (
     require_farm_permission,
     require_pond_permission,
 )
-from app.services.common import apply_updates, get_or_404
+from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
+from app.services.prediction import PredictionError, generate_prediction, preview_prediction
 
 router = APIRouter(prefix="/cycles", tags=["cycles"])
 _BLIND_FEEDING_SESSIONS = [
@@ -109,6 +114,14 @@ _BLIND_FEEDING_SESSIONS = [
     (dtime(14, 0), Decimal("0.30")),
     (dtime(18, 0), Decimal("0.15")),
 ]
+
+
+def _cycle_payload(payload: CycleCreate | CycleUpdate, exclude_unset: bool = False) -> dict:
+    data = payload.model_dump(exclude_unset=exclude_unset)
+    json_data = payload.model_dump(mode="json", exclude_unset=exclude_unset)
+    if "prediction_config" in data:
+        data["prediction_config"] = json_data["prediction_config"]
+    return data
 
 
 async def _pond_farm_id(db: AsyncSession, pond_id: UUID) -> UUID:
@@ -195,7 +208,7 @@ async def create_cycle(
     await require_pond_permission(db, user, payload.pond_id, "add")
     farm_id = await _pond_farm_id(db, payload.pond_id)
     template = await _get_cycle_template(db, payload.blind_feeding_template_id, farm_id)
-    data = payload.model_dump()
+    data = _cycle_payload(payload)
     cycle = Cycle(**data)
     if template:
         _add_blind_feedings(cycle, template)
@@ -224,7 +237,8 @@ async def update_cycle(
 ) -> Cycle:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
-    apply_updates(cycle, payload)
+    for key, value in _cycle_payload(payload, exclude_unset=True).items():
+        setattr(cycle, key, value)
     await db.commit()
     await db.refresh(cycle)
     return cycle
@@ -333,6 +347,48 @@ async def get_cycle_prediction_baseline(
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     baseline = await get_prediction_baseline(db, cycle, start_date)
     return PredictionBaselineOut(**baseline)
+
+
+@router.post("/{cycle_id}/prediction/preview", response_model=PredictionResultOut)
+async def preview_cycle_prediction(
+    cycle_id: UUID,
+    payload: PredictionRequest,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionResultOut:
+    await require_cycle_permission(db, user, cycle_id)
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    try:
+        return await preview_prediction(
+            db,
+            cycle,
+            payload.start_date,
+            payload.target_doc,
+            payload.optimize_partial_harvests,
+        )
+    except PredictionError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error))
+
+
+@router.post("/{cycle_id}/prediction/generate", response_model=PredictionResultOut)
+async def generate_cycle_prediction(
+    cycle_id: UUID,
+    payload: PredictionRequest,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> PredictionResultOut:
+    await require_cycle_permission(db, user, cycle_id, "manage")
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    try:
+        return await generate_prediction(
+            db,
+            cycle,
+            payload.start_date,
+            payload.target_doc,
+            payload.optimize_partial_harvests,
+        )
+    except PredictionError as error:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(error))
 
 
 @router.post("/{cycle_id}/batch-import/feedings-abw", response_model=BatchFeedingAbwImportOut)

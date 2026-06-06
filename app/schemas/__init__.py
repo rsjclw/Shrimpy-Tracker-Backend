@@ -4,7 +4,7 @@ from app.schemas.blind_feeding import (
     BlindFeedingTemplateOut,
     BlindFeedingTemplateUpdate,
 )
-from app.schemas.cycle import CycleCreate, CycleOut
+from app.schemas.cycle import CycleCreate, CycleOut, PredictionConfig
 from app.schemas.day import (
     DailyLogUpdate,
     DayMetrics,
@@ -28,6 +28,11 @@ from app.schemas.farm import (
 from app.schemas.grid import GridCreate, GridOut, GridUpdate
 from app.schemas.harvest import HarvestCreate, HarvestOut, HarvestUpdate
 from app.schemas.pond import PondCreate, PondOut, PondUpdate
+from app.schemas.prediction import (
+    PredictionGeneratedCounts,
+    PredictionRequest,
+    PredictionResultOut,
+)
 from app.schemas.sample import PopulationSampleCreate, PopulationSampleOut
 from app.schemas.treatment import TreatmentCreate, TreatmentOut, TreatmentUpdate
 from app.schemas.water import WaterParametersUpsert, WaterParametersOut
@@ -51,6 +56,7 @@ __all__ = [
     "PondOut",
     "CycleCreate",
     "CycleOut",
+    "PredictionConfig",
     "FeedTypeCreate",
     "FeedTypeUpdate",
     "FeedTypeOut",
@@ -78,4 +84,7 @@ __all__ = [
     "TreatmentOut",
     "PopulationSampleCreate",
     "PopulationSampleOut",
+    "PredictionRequest",
+    "PredictionResultOut",
+    "PredictionGeneratedCounts",
 ]
