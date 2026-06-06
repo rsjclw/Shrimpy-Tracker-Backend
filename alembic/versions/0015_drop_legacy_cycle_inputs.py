@@ -1,6 +1,6 @@
 """drop legacy cycle prediction input columns
 
-Revision ID: 0015_drop_legacy_cycle_prediction_inputs
+Revision ID: 0015_drop_legacy_cycle_inputs
 Revises: 0014_cycle_prediction_config
 Create Date: 2026-06-06
 
@@ -9,7 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 
-revision: str = "0015_drop_legacy_cycle_prediction_inputs"
+revision: str = "0015_drop_legacy_cycle_inputs"
 down_revision: Union[str, None] = "0014_cycle_prediction_config"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
