@@ -1,7 +1,7 @@
 """store harvest total price
 
 Revision ID: 0013_harvest_total_price
-Revises: 0012_blind_feeding_target_abw
+Revises: 0013_cycle_prediction_inputs
 Create Date: 2026-06-06
 
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0013_harvest_total_price"
-down_revision: Union[str, None] = "0012_blind_feeding_target_abw"
+down_revision: Union[str, None] = "0013_cycle_prediction_inputs"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
