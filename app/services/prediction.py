@@ -1,3 +1,4 @@
+import asyncio
 import dataclasses
 import math
 from datetime import date as ddate
@@ -21,8 +22,8 @@ from app.schemas.prediction import (
 from app.services.day_view import get_prediction_baseline
 from app.services.feeding_amounts import round_feed_amount_kg
 
-PARTIAL_HARVEST_STEP_KG = 25
-MAX_OPTIMIZER_STATES_PER_DOC = 5000
+PARTIAL_HARVEST_STEP_KG = 50
+MAX_OPTIMIZER_STATES_PER_DOC = 500
 HARVEST_TIME = dtime(5, 0)
 FEEDING_SPLIT = (
     (dtime(6, 0), Decimal("0.25")),
@@ -956,7 +957,8 @@ async def preview_prediction(
     optimize: bool,
 ) -> PredictionResultOut:
     config = await build_config(db, cycle, start_date, target_doc)
-    result = optimize_partial_harvests(config) if optimize else simulate(config)
+    runner = optimize_partial_harvests if optimize else simulate
+    result = await asyncio.to_thread(runner, config)
     return result_to_out(cycle.start_date, result)
 
 
