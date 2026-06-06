@@ -200,7 +200,7 @@ class Harvest(Base):
     harvest_time: Mapped[time] = mapped_column(Time, nullable=False)
     biomass_kg: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
     sampled_abw_g: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
-    price_per_kg: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    total_price: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     estimated_count: Mapped[int] = mapped_column(Integer, nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
 

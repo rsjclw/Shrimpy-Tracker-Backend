@@ -9,7 +9,7 @@ class HarvestCreate(BaseModel):
     harvest_time: dtime
     biomass_kg: Decimal = Field(gt=0)
     sampled_abw_g: Decimal = Field(gt=0)
-    price_per_kg: Decimal = Field(ge=0)
+    total_price: Decimal = Field(ge=0)
     notes: str | None = None
 
 
@@ -17,7 +17,7 @@ class HarvestUpdate(BaseModel):
     harvest_time: dtime | None = None
     biomass_kg: Decimal | None = Field(default=None, gt=0)
     sampled_abw_g: Decimal | None = Field(default=None, gt=0)
-    price_per_kg: Decimal | None = Field(default=None, ge=0)
+    total_price: Decimal | None = Field(default=None, ge=0)
     notes: str | None = None
 
 
@@ -29,6 +29,6 @@ class HarvestOut(BaseModel):
     harvest_time: dtime
     biomass_kg: Decimal
     sampled_abw_g: Decimal
-    price_per_kg: Decimal
+    total_price: Decimal
     estimated_count: int
     notes: str | None

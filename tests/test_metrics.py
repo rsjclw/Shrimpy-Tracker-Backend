@@ -28,6 +28,7 @@ from app.services.metrics import (
 )
 from app.routers.cycles import BatchFeedingIn
 from app.schemas.feeding import FeedingCreate, FeedingUpdate
+from app.schemas.harvest import HarvestCreate, HarvestUpdate
 
 
 def test_doc_for_first_day_is_one():
@@ -242,6 +243,19 @@ def test_batch_feeding_amounts_round_to_one_decimal():
     feeding = BatchFeedingIn(feed_time=time(8, 0), amount_kg=Decimal("3.26"))
 
     assert feeding.amount_kg == Decimal("3.3")
+
+
+def test_harvest_uses_total_price():
+    create = HarvestCreate(
+        harvest_time=time(16, 0),
+        biomass_kg=Decimal("500"),
+        sampled_abw_g=Decimal("25"),
+        total_price=Decimal("34000000"),
+    )
+    update = HarvestUpdate(total_price=Decimal("32000000"))
+
+    assert create.total_price == Decimal("34000000")
+    assert update.total_price == Decimal("32000000")
 
 
 def test_adg_g_per_day_uses_sample_times():
