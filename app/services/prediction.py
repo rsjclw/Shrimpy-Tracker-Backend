@@ -880,11 +880,16 @@ async def build_config(
     starting_population = int(baseline["estimated_population"])
     if starting_population <= 0:
         raise PredictionError("Estimated population must be greater than 0")
-    start_biomass = (
-        Decimal(baseline["previous_biomass_kg"])
-        + Decimal(baseline["feed_since_previous_sample_start_kg"]) / Decimal(str(target_fcr))
-        - Decimal(baseline["harvested_biomass_since_previous_sample_kg"])
-    )
+    sampled_initial_abw = baseline.get("initial_abw_g")
+    if sampled_initial_abw is not None:
+        initial_abw_decimal = Decimal(sampled_initial_abw)
+        start_biomass = (Decimal(starting_population) * initial_abw_decimal) / Decimal("1000")
+    else:
+        start_biomass = (
+            Decimal(baseline["previous_biomass_kg"])
+            + Decimal(baseline["feed_since_previous_sample_start_kg"]) / Decimal(str(target_fcr))
+            - Decimal(baseline["harvested_biomass_since_previous_sample_kg"])
+        )
     if start_biomass <= 0:
         raise PredictionError("Estimated biomass must be greater than 0")
     initial_abw_g = float((start_biomass * Decimal("1000")) / Decimal(starting_population))
@@ -995,8 +1000,10 @@ def result_to_out(cycle_start_date: ddate, result: SimulationResult, generated: 
     ]
     partials = [_partial_harvest_out(cycle_start_date, event) for event in result.partial_harvests]
     total_harvested = result.final_biomass_kg + sum(event.kg_harvested for event in result.partial_harvests)
+    initial_abw_g = result.daily_results[0].starting_abw_g if result.daily_results else result.final_abw_g
     return PredictionResultOut(
         summary=PredictionSummaryOut(
+            initial_abw_g=_decimal(initial_abw_g, "0.0001"),
             final_doc=result.final_doc,
             final_date=_date_for_doc(cycle_start_date, result.final_doc),
             final_abw_g=_decimal(result.final_abw_g, "0.0001"),
@@ -1054,16 +1061,26 @@ async def apply_prediction_result(
     first_target_date = min(target_dates)
 
     existing_result = await db.execute(
-        select(DailyLog.id).where(DailyLog.cycle_id == cycle.id, DailyLog.date >= first_target_date)
+        select(DailyLog).where(DailyLog.cycle_id == cycle.id, DailyLog.date >= first_target_date)
     )
-    existing_log_ids = list(existing_result.scalars().all())
-    daily_logs_deleted = len(existing_log_ids)
+    existing_logs = list(existing_result.scalars().all())
+    existing_logs_by_date = {log.date: log for log in existing_logs}
+    preserved_start_log = existing_logs_by_date.get(first_target_date)
+    preserved_start_abw = preserved_start_log is not None and preserved_start_log.abw_g is not None
+    existing_log_ids = [log.id for log in existing_logs]
+    deleted_log_ids = [
+        log.id
+        for log in existing_logs
+        if preserved_start_log is None or log.id != preserved_start_log.id
+    ]
+    daily_logs_deleted = len(deleted_log_ids)
     if existing_log_ids:
         await db.execute(delete(FeedingSession).where(FeedingSession.daily_log_id.in_(existing_log_ids)))
         await db.execute(delete(WaterParameters).where(WaterParameters.daily_log_id.in_(existing_log_ids)))
         await db.execute(delete(Harvest).where(Harvest.daily_log_id.in_(existing_log_ids)))
         await db.execute(delete(Treatment).where(Treatment.daily_log_id.in_(existing_log_ids)))
-        await db.execute(delete(DailyLog).where(DailyLog.id.in_(existing_log_ids)))
+    if deleted_log_ids:
+        await db.execute(delete(DailyLog).where(DailyLog.id.in_(deleted_log_ids)))
     await db.execute(
         delete(PopulationSample).where(
             PopulationSample.cycle_id == cycle.id,
@@ -1078,11 +1095,14 @@ async def apply_prediction_result(
     final_date = preview.summary.final_date
 
     for row in preview.daily_rows:
-        log = DailyLog(cycle_id=cycle.id, date=row.date)
-        if row.date == final_date:
+        if row.date == first_target_date and preserved_start_log is not None:
+            log = preserved_start_log
+        else:
+            log = DailyLog(cycle_id=cycle.id, date=row.date)
+            db.add(log)
+        if row.date == final_date and not (row.date == first_target_date and preserved_start_abw):
             log.abw_g = row.ending_abw_g
             log.abw_sample_time = HARVEST_TIME
-        db.add(log)
         logs_by_date[row.date] = log
 
     await db.flush()

@@ -377,6 +377,32 @@ class _FakeDb:
 
 
 @pytest.mark.asyncio
+async def test_prediction_baseline_exposes_target_day_abw_sample(monkeypatch):
+    async def fake_gather(db, cycle):
+        return (
+            [],
+            [],
+            [AbwRow(date(2026, 5, 10), Decimal("8.2"), time(5, 0))],
+            [],
+        )
+
+    monkeypatch.setattr(day_view, "_gather", fake_gather)
+    cycle = SimpleNamespace(
+        start_date=date(2026, 5, 1),
+        initial_abw_g=Decimal("1.0"),
+        initial_population=100_000,
+    )
+
+    baseline = await day_view.get_prediction_baseline(
+        SimpleNamespace(),
+        cycle,
+        date(2026, 5, 10),
+    )
+
+    assert baseline["initial_abw_g"] == Decimal("8.2")
+
+
+@pytest.mark.asyncio
 async def test_harvest_dates_returns_logged_harvest_days_only():
     harvest_date = date(2026, 5, 4)
 

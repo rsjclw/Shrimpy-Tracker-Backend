@@ -168,10 +168,11 @@ def _compute_sampling_metrics(
     )
 
 
-async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate) -> dict[str, Decimal | int]:
+async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate) -> dict[str, Decimal | int | None]:
     """Return the sample-FCR baseline that remains after prediction clears target onward."""
     feedings, samples, abw_history, harvests = await _gather(db, cycle)
     target_start = datetime.combine(target, dtime(0, 0))
+    target_abw = next((a for a in abw_history if a.date == target), None)
 
     previous_samples = [a for a in abw_history if a.sampled_at < target_start]
     previous = (
@@ -199,6 +200,7 @@ async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate)
         ),
         "estimated_population": prediction_pop,
         "harvested_biomass_since_previous_sample_kg": period_harvested_biomass,
+        "initial_abw_g": target_abw.abw_g if target_abw else None,
     }
 
 

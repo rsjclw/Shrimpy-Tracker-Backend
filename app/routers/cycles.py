@@ -88,6 +88,7 @@ class PredictionBaselineOut(BaseModel):
     feed_since_previous_sample_start_kg: Decimal
     estimated_population: int
     harvested_biomass_since_previous_sample_kg: Decimal
+    initial_abw_g: Decimal | None = None
 
 
 from app.services.day_view import (

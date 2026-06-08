@@ -52,6 +52,7 @@ class PredictionPartialHarvestOut(BaseModel):
 
 
 class PredictionSummaryOut(BaseModel):
+    initial_abw_g: Decimal
     final_doc: int
     final_date: ddate
     final_abw_g: Decimal
