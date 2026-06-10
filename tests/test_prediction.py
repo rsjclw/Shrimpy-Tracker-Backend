@@ -8,10 +8,12 @@ import pytest
 from app.models import DailyLog
 from app.schemas.prediction import (
     PredictionDailyRowOut,
+    PredictionPartialHarvestOut,
     PredictionResultOut,
     PredictionSummaryOut,
 )
 from app.services import prediction
+from app.services import prediction_core as core
 
 
 def base_config(**overrides):
@@ -24,7 +26,10 @@ def base_config(**overrides):
         "initial_abw_g": 5,
         "maximum_shrimp_size_g": 100,
         "initial_cumulative_feed_kg": 0,
+        "total_feed_blind_feeding_kg": 0.0,
+        "blind_feed_additional_cost": 0.0,
         "past_cost": 0,
+        "observed_state_mode": True,
         "target_fcr": 1,
         "maximum_adg_g_per_day": 10,
         "initial_feeding_index": 1,
@@ -33,6 +38,7 @@ def base_config(**overrides):
         "stable_carrying_capacity_kg_per_m2": 2,
         "final_carrying_capacity_kg_per_m2": 100,
         "minimum_partial_harvest_biomass_kg": 350,
+        "minimum_partial_harvest_abw_g": 0,
         "harvest_fixed_cost_per_event": 0,
         "harvest_price_points": [
             prediction.PricePoint(count_size=20, price_per_kg=80),
@@ -58,7 +64,7 @@ def base_config(**overrides):
         ],
     }
     values.update(overrides)
-    return prediction.Config(**values)
+    return core.Config(**values)
 
 
 def profitable_partial_config():
@@ -80,36 +86,38 @@ def test_price_interpolation_and_clamping():
         prediction.PricePoint(count_size=20, price_per_kg=80),
     ]
 
-    assert prediction.interpolate_price(points, 10) == 80
-    assert prediction.interpolate_price(points, 50) == 60
-    assert prediction.interpolate_price(points, 30) == 70
+    assert core.interpolate_price(points, 10) == 80
+    assert core.interpolate_price(points, 50) == 60
+    assert core.interpolate_price(points, 30) == 70
 
 
-def test_same_day_prediction_has_no_feedings():
-    result = prediction.simulate(base_config(final_doc=31))
+def test_single_day_prediction_feeds_start_day():
+    # Source-of-truth core feeds on every simulated day, including the start/terminal
+    # day (the old backend fork left the terminal day unfed).
+    result = core.simulate(base_config(final_doc=31))
 
     assert result.final_doc == 31
-    assert result.daily_results[0].actual_feed_kg == 0
-    assert result.final_abw_g == 5
+    assert result.daily_results[0].actual_feed_kg == 31
+    assert result.final_abw_g == 5.31
 
 
 def test_feed_cap_by_max_daily_feed():
     feed = base_config().feed_plan[0]
     feed.maximum_daily_feed_kg = 10
 
-    result = prediction.simulate(base_config(feed_plan=[feed]))
+    result = core.simulate(base_config(feed_plan=[feed]))
 
     assert result.daily_results[0].actual_feed_kg == 10
 
 
 def test_feed_cap_by_max_adg():
-    result = prediction.simulate(base_config(target_fcr=2, maximum_adg_g_per_day=0.1))
+    result = core.simulate(base_config(target_fcr=2, maximum_adg_g_per_day=0.1))
 
     assert result.daily_results[0].actual_feed_kg == 20
 
 
 def test_early_stop_at_final_carrying_capacity():
-    result = prediction.simulate(
+    result = core.simulate(
         base_config(
             starting_population=1000,
             initial_abw_g=5,
@@ -123,7 +131,7 @@ def test_early_stop_at_final_carrying_capacity():
 
 
 def test_early_stop_at_maximum_shrimp_size():
-    result = prediction.simulate(
+    result = core.simulate(
         base_config(
             starting_population=1000,
             initial_abw_g=9,
@@ -139,16 +147,17 @@ def test_early_stop_at_maximum_shrimp_size():
 
 
 def test_optimizer_chooses_profitable_partial_harvest():
-    baseline = prediction.simulate(profitable_partial_config())
-    optimized = prediction.optimize_partial_harvests(profitable_partial_config())
+    baseline = core.simulate(profitable_partial_config())
+    optimized = core.optimize_partial_harvests(profitable_partial_config())
 
     assert len(optimized.partial_harvests) >= 1
     assert optimized.profit_per_day > baseline.profit_per_day
 
 
 def test_prediction_output_summary_includes_initial_abw():
-    result = prediction.simulate(base_config(initial_abw_g=8, final_doc=32))
-    out = prediction.result_to_out(date(2026, 5, 1), result)
+    config = base_config(initial_abw_g=8, final_doc=32)
+    result = core.simulate(config)
+    out = prediction.result_to_out(date(2026, 5, 1), result, config.feed_plan)
 
     assert out.summary.initial_abw_g == Decimal("8.0000")
 
@@ -313,3 +322,74 @@ async def test_apply_prediction_preserves_start_day_abw_sampling():
     assert result.generated.daily_logs_deleted == 1
     assert db.flushed
     assert db.committed
+
+
+@pytest.mark.asyncio
+async def test_apply_prediction_anchors_partial_harvest_abw_and_final_harvest():
+    from app.models import Harvest
+
+    start = date(2026, 5, 10)
+    partial_day = date(2026, 5, 11)
+    final = date(2026, 5, 12)
+    db = _ApplyPredictionDb([])
+    preview = PredictionResultOut(
+        summary=PredictionSummaryOut(
+            initial_abw_g=Decimal("8.0000"),
+            final_doc=12,
+            final_date=final,
+            final_abw_g=Decimal("10.0000"),
+            final_biomass_kg=Decimal("500"),
+            total_harvested_biomass_kg=Decimal("900"),
+            cumulative_feed_kg=Decimal("0"),
+            simulated_feed_kg=Decimal("0"),
+            final_revenue=Decimal("1000"),
+            partial_revenue=Decimal("400"),
+            total_revenue=Decimal("1400"),
+            feed_cost=Decimal("0"),
+            total_costs=Decimal("0"),
+            profit=Decimal("0"),
+            profit_per_day=Decimal("0"),
+            harvest_count_size=Decimal("100"),
+            harvest_price_per_kg=Decimal("2"),
+            stop_reason="final_doc",
+        ),
+        daily_rows=[
+            _prediction_daily_row(start, 10, "8.0000", "8.5000"),
+            _prediction_daily_row(partial_day, 11, "9.0000", "9.5000"),
+            _prediction_daily_row(final, 12, "9.5000", "10.0000"),
+        ],
+        partial_harvests=[
+            PredictionPartialHarvestOut(
+                date=partial_day,
+                doc=11,
+                biomass_kg=Decimal("400"),
+                sampled_abw_g=Decimal("9.0000"),
+                count_size=Decimal("111.11"),
+                price_per_kg=Decimal("1"),
+                total_price=Decimal("400"),
+                estimated_count=44444,
+            )
+        ],
+        generated=None,
+    )
+
+    result = await prediction.apply_prediction_result(
+        db,
+        SimpleNamespace(id=uuid4()),
+        preview,
+    )
+
+    logs = {item.date: item for item in db.added if isinstance(item, DailyLog)}
+    # Partial harvest day carries an ABW anchor equal to the harvest ABW.
+    assert logs[partial_day].abw_g == Decimal("9.0000")
+    assert logs[partial_day].abw_sample_time == time(5, 0)
+    # Final day carries the ending ABW anchor.
+    assert logs[final].abw_g == Decimal("10.0000")
+
+    harvests = [item for item in db.added if isinstance(item, Harvest)]
+    # One partial harvest plus the final harvest of the standing crop.
+    assert len(harvests) == 2
+    final_harvest = next(h for h in harvests if h.notes == "Predicted final harvest")
+    assert final_harvest.biomass_kg == Decimal("500")
+    assert final_harvest.sampled_abw_g == Decimal("10.0000")
+    assert result.generated.feedings_created == 0
