@@ -91,14 +91,14 @@ def test_price_interpolation_and_clamping():
     assert core.interpolate_price(points, 30) == 70
 
 
-def test_single_day_prediction_feeds_start_day():
-    # Source-of-truth core feeds on every simulated day, including the start/terminal
-    # day (the old backend fork left the terminal day unfed).
+def test_single_day_prediction_does_not_feed_final_harvest_day():
     result = core.simulate(base_config(final_doc=31))
 
     assert result.final_doc == 31
-    assert result.daily_results[0].actual_feed_kg == 31
-    assert result.final_abw_g == 5.31
+    assert result.daily_results[0].stop_reason == "final_doc"
+    assert result.daily_results[0].actual_feed_kg == 0
+    assert result.simulated_feed_kg == 0
+    assert result.final_abw_g == 5
 
 
 def test_feed_cap_by_max_daily_feed():
@@ -116,6 +116,16 @@ def test_feed_cap_by_max_adg():
     assert result.daily_results[0].actual_feed_kg == 20
 
 
+def test_result_to_out_omits_feedings_on_final_harvest_day():
+    config = base_config(final_doc=31)
+    result = core.simulate(config)
+
+    out = prediction.result_to_out(date(2026, 5, 1), result, config.feed_plan)
+
+    assert out.daily_rows[0].actual_feed_kg == Decimal("0")
+    assert out.daily_rows[0].feedings == []
+
+
 def test_early_stop_at_final_carrying_capacity():
     result = core.simulate(
         base_config(
@@ -128,6 +138,7 @@ def test_early_stop_at_final_carrying_capacity():
 
     assert result.stop_reason == "final_carrying_capacity"
     assert result.final_doc == 31
+    assert result.daily_results[-1].actual_feed_kg == 0
 
 
 def test_early_stop_at_maximum_shrimp_size():
@@ -144,6 +155,8 @@ def test_early_stop_at_maximum_shrimp_size():
 
     assert result.stop_reason == "maximum_shrimp_size"
     assert result.final_doc == 31
+    assert result.daily_results[-1].actual_feed_kg == 0
+    assert result.final_abw_g == 9
 
 
 def test_optimizer_chooses_profitable_partial_harvest():
@@ -152,6 +165,18 @@ def test_optimizer_chooses_profitable_partial_harvest():
 
     assert len(optimized.partial_harvests) >= 1
     assert optimized.profit_per_day > baseline.profit_per_day
+
+
+def test_optimizer_final_harvest_before_configured_final_doc_has_no_feed():
+    config = profitable_partial_config()
+    config.final_doc = 70
+    config.final_carrying_capacity_kg_per_m2 = 2.0
+
+    result = core.optimize_partial_harvests(config)
+
+    assert result.final_doc < config.final_doc
+    assert result.stop_reason == "final_carrying_capacity"
+    assert result.daily_results[-1].actual_feed_kg == 0
 
 
 def test_prediction_output_summary_includes_initial_abw():

@@ -484,6 +484,8 @@ def run_daily_step(
     day_start_population=None,
     day_start_biomass_kg=None,
     partial_event=None,
+    suppress_feed=False,
+    forced_stop_reason=None,
 ):
     day_start_population = population if day_start_population is None else day_start_population
     day_start_biomass_kg = biomass_kg if day_start_biomass_kg is None else day_start_biomass_kg
@@ -504,6 +506,8 @@ def run_daily_step(
         feed_from_adg_limit,
         feed_from_size_limit,
     )
+    if suppress_feed:
+        actual_feed_kg = 0
 
     biomass_gain_kg = actual_feed_kg / config.target_fcr
     biomass_kg += biomass_gain_kg
@@ -517,13 +521,16 @@ def run_daily_step(
     feed_cost += daily_feed_cost
     stable_locked_after_day = stable_locked or biomass_kg >= stable_capacity_kg(config)
 
-    day_stop_reason = ""
-    if biomass_kg >= final_capacity_kg(config):
-        day_stop_reason = "final_carrying_capacity"
-    elif ending_abw_g >= config.maximum_shrimp_size_g:
-        day_stop_reason = "maximum_shrimp_size"
-    elif doc == config.final_doc:
-        day_stop_reason = "final_doc"
+    if forced_stop_reason is not None:
+        day_stop_reason = forced_stop_reason
+    else:
+        day_stop_reason = ""
+        if biomass_kg >= final_capacity_kg(config):
+            day_stop_reason = "final_carrying_capacity"
+        elif ending_abw_g >= config.maximum_shrimp_size_g:
+            day_stop_reason = "maximum_shrimp_size"
+        elif doc == config.final_doc:
+            day_stop_reason = "final_doc"
 
     row = DailyResult(
         doc=doc,
@@ -790,6 +797,12 @@ def simulate(config):
     final_doc = config.start_doc - 1
 
     for doc in range(config.start_doc, config.final_doc + 1):
+        day_start_population = population
+        day_start_biomass_kg = biomass_kg
+        day_start_cumulative_feed_kg = cumulative_feed_kg
+        day_start_simulated_feed_kg = simulated_feed_kg
+        day_start_feed_cost = feed_cost
+        day_start_stable_locked = stable_locked
         (
             population,
             biomass_kg,
@@ -809,6 +822,28 @@ def simulate(config):
             feed_cost,
             stable_locked,
         )
+        if day_stop_reason:
+            (
+                population,
+                biomass_kg,
+                cumulative_feed_kg,
+                simulated_feed_kg,
+                feed_cost,
+                daily_result,
+                day_stop_reason,
+                stable_locked,
+            ) = run_daily_step(
+                config,
+                doc,
+                day_start_population,
+                day_start_biomass_kg,
+                day_start_cumulative_feed_kg,
+                day_start_simulated_feed_kg,
+                day_start_feed_cost,
+                day_start_stable_locked,
+                suppress_feed=True,
+                forced_stop_reason=day_stop_reason,
+            )
         daily_results.append(daily_result)
         final_doc = doc
 
@@ -914,6 +949,30 @@ def optimize_partial_harvests(config):
                 )
 
                 if day_stop_reason:
+                    (
+                        next_population,
+                        next_biomass_kg,
+                        next_cumulative_feed_kg,
+                        next_simulated_feed_kg,
+                        next_feed_cost,
+                        daily_result,
+                        day_stop_reason,
+                        next_stable_locked,
+                    ) = run_daily_step(
+                        config,
+                        doc,
+                        population_after_harvest,
+                        biomass_after_harvest_kg,
+                        state.cumulative_feed_kg,
+                        state.simulated_feed_kg,
+                        state.feed_cost,
+                        state_stable_locked,
+                        day_start_population=day_start_population,
+                        day_start_biomass_kg=day_start_biomass_kg,
+                        partial_event=partial_event,
+                        suppress_feed=True,
+                        forced_stop_reason=day_stop_reason,
+                    )
                     daily_results = state.daily_results + (daily_result,)
                     candidate = finalize_simulation(
                         config=config,
