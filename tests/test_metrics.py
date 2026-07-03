@@ -364,6 +364,9 @@ class _ExecuteResult:
     def __init__(self, values):
         self.values = values
 
+    def all(self):
+        return self.values
+
     def scalars(self):
         return _ScalarResult(self.values)
 
@@ -414,3 +417,49 @@ async def test_harvest_dates_returns_logged_harvest_days_only():
     )
 
     assert result == {harvest_date}
+
+
+@pytest.mark.asyncio
+async def test_water_trend_computes_biology_derived_metrics():
+    water = SimpleNamespace(
+        plankton_ga=Decimal("10"),
+        plankton_bga=None,
+        plankton_diatom=Decimal("5"),
+        plankton_yga=None,
+        plankton_eugle=None,
+        plankton_dino=None,
+        plankton_zoo=None,
+        plankton_protozoa=None,
+        yellow_vibrio=Decimal("1"),
+        green_vibrio=None,
+        black_vibrio=Decimal("2"),
+        tbc=Decimal("12"),
+    )
+    db = _FakeDb([(date(2026, 5, 2), water)])
+    cycle = SimpleNamespace(id="cycle-1")
+
+    total_plankton = await day_view.get_trend(
+        db,
+        cycle,
+        "total_plankton",
+        date(2026, 5, 1),
+        date(2026, 5, 3),
+    )
+    vibrio_percentage = await day_view.get_trend(
+        db,
+        cycle,
+        "vibrio_percentage",
+        date(2026, 5, 1),
+        date(2026, 5, 3),
+    )
+
+    assert total_plankton == [
+        (date(2026, 5, 1), None),
+        (date(2026, 5, 2), Decimal("15")),
+        (date(2026, 5, 3), None),
+    ]
+    assert vibrio_percentage == [
+        (date(2026, 5, 1), None),
+        (date(2026, 5, 2), Decimal("25.00")),
+        (date(2026, 5, 3), None),
+    ]

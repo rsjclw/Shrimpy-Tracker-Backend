@@ -23,6 +23,7 @@ from app.schemas import (
     TreatmentOut,
     WaterParametersOut,
 )
+from app.schemas.water import BIOLOGY_COMPUTED_FIELDS, BIOLOGY_SOURCE_FIELDS, water_metric_value
 from app.services import metrics as M
 
 
@@ -342,19 +343,23 @@ METRIC_EXTRACTORS = {
     "fcr": lambda m: m.fcr,
 }
 
-WATER_METRICS = {
-    "do_am": WaterParameters.do_am,
-    "do_pm": WaterParameters.do_pm,
-    "ph_am": WaterParameters.ph_am,
-    "ph_pm": WaterParameters.ph_pm,
-    "salinity": WaterParameters.salinity,
-    "tan": WaterParameters.tan,
-    "nitrite": WaterParameters.nitrite,
-    "phosphate": WaterParameters.phosphate,
-    "calcium": WaterParameters.calcium,
-    "magnesium": WaterParameters.magnesium,
-    "alkalinity": WaterParameters.alkalinity,
-}
+WATER_METRICS = (
+    "do_am",
+    "do_pm",
+    "ph_am",
+    "ph_pm",
+    "water_clarity_am",
+    "water_clarity_pm",
+    "salinity",
+    "tan",
+    "nitrite",
+    "phosphate",
+    "calcium",
+    "magnesium",
+    "alkalinity",
+    *BIOLOGY_SOURCE_FIELDS,
+    *BIOLOGY_COMPUTED_FIELDS,
+)
 
 
 async def get_trend(
@@ -375,7 +380,7 @@ async def get_trend(
 
     if metric in WATER_METRICS:
         result = await db.execute(
-            select(DailyLog.date, WATER_METRICS[metric])
+            select(DailyLog.date, WaterParameters)
             .join(WaterParameters, WaterParameters.daily_log_id == DailyLog.id)
             .where(
                 DailyLog.cycle_id == cycle.id,
@@ -383,7 +388,7 @@ async def get_trend(
                 DailyLog.date <= date_to,
             )
         )
-        values = {r[0]: r[1] for r in result.all()}
+        values = {row[0]: water_metric_value(row[1], metric) for row in result.all()}
         current = date_from
         while current <= date_to:
             points.append((current, values.get(current)))
