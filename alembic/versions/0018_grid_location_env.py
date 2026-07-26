@@ -1,9 +1,11 @@
 """grid coordinates and cached daily environment
 
-Revision ID: 0018_grid_location_and_environment
+Revision ID: 0018_grid_location_env
 Revises: 0017_water_clarity
 Create Date: 2026-07-26
 
+Keep revision ids under 32 characters - alembic_version.version_num is
+varchar(32) and a longer id fails only at the very end of the migration.
 """
 from typing import Sequence, Union
 
@@ -11,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0018_grid_location_and_environment"
+revision: str = "0018_grid_location_env"
 down_revision: Union[str, None] = "0017_water_clarity"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
