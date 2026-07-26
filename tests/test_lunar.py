@@ -11,9 +11,11 @@ import ephem
 import pytest
 
 from app.services.lunar import (
-    FULL_HALF_WIDTH_DAYS,
+    FULL_DAYS_AFTER,
+    FULL_DAYS_BEFORE,
     LEAD_DAYS,
-    NEW_HALF_WIDTH_DAYS,
+    NEW_DAYS_AFTER,
+    NEW_DAYS_BEFORE,
     lunar_day,
 )
 
@@ -29,6 +31,24 @@ def _date_of_next(kind: str, after: date) -> date:
 
 
 ANCHOR = date(2026, 1, 15)
+
+
+def _day_where(kind: str, predicate, span: int = 40):
+    """First day within `span` whose signed distance satisfies `predicate`.
+
+    Date offsets alone are not safe near the window edges: a syzygy can fall at
+    any hour, so "peak + 2 days" lands anywhere in -2.5..-1.5. Selecting on the
+    signed distance pins the assertion to the rule under test.
+
+    Bands must be a full day wide - consecutive days differ by exactly 1.0, so
+    anything narrower can fall between two samples and never match.
+    """
+    for offset in range(span):
+        day = lunar_day(ANCHOR + timedelta(days=offset), JAKARTA)
+        value = day.days_to_full if kind == "full" else day.days_to_new
+        if predicate(value):
+            return day
+    raise AssertionError(f"no {kind} day matched within {span} days")
 
 
 # --- illumination -----------------------------------------------------------
@@ -78,10 +98,10 @@ def test_waxing_is_true_before_full_and_false_after():
 
 
 @pytest.mark.parametrize("kind,expected", [("full", "full"), ("new", "new")])
-def test_window_covers_the_two_day_shoulders(kind, expected):
+def test_window_covers_the_days_around_the_peak(kind, expected):
     peak = _date_of_next(kind, ANCHOR)
 
-    for offset in (-2, -1, 0, 1, 2):
+    for offset in (-2, -1, 0, 1):
         day = lunar_day(peak + timedelta(days=offset), JAKARTA)
         assert day.window == expected, f"{kind} {offset:+d} should be in window"
 
@@ -94,14 +114,33 @@ def test_window_is_closed_four_days_out(kind):
     assert lunar_day(peak + timedelta(days=4), JAKARTA).window != kind
 
 
-def test_half_widths_are_respected_exactly():
-    """The window edge follows the constants, not an illumination cutoff."""
+@pytest.mark.parametrize("kind", ["full", "new"])
+def test_window_reaches_three_days_before_the_peak(kind):
+    day = _day_where(kind, lambda value: 2.0 < value <= 3.0)
+
+    assert day.window == kind
+
+
+@pytest.mark.parametrize("kind", ["full", "new"])
+def test_window_has_closed_by_three_days_after_the_peak(kind):
+    """Molting tails off after the peak, so the window ends earlier on that side."""
+    day = _day_where(kind, lambda value: -3.0 <= value < -2.0)
+
+    assert day.window != kind
+
+
+def test_window_is_asymmetric_around_the_peak():
+    assert FULL_DAYS_BEFORE > FULL_DAYS_AFTER
+    assert NEW_DAYS_BEFORE > NEW_DAYS_AFTER
+
+
+def test_window_edges_follow_the_constants_not_illumination():
     full = _date_of_next("full", ANCHOR)
 
     for offset in range(-6, 7):
         day = lunar_day(full + timedelta(days=offset), JAKARTA)
-        in_full = abs(day.days_to_full) <= FULL_HALF_WIDTH_DAYS
-        in_new = abs(day.days_to_new) <= NEW_HALF_WIDTH_DAYS
+        in_full = -FULL_DAYS_AFTER <= day.days_to_full <= FULL_DAYS_BEFORE
+        in_new = -NEW_DAYS_AFTER <= day.days_to_new <= NEW_DAYS_BEFORE
         expected = "full" if in_full else ("new" if in_new else None)
         assert day.window == expected
 
@@ -109,15 +148,28 @@ def test_half_widths_are_respected_exactly():
 def test_a_high_illumination_day_outside_the_window_is_not_flagged():
     """The regression this design exists to prevent.
 
-    Roughly 3.4 days before full the moon is ~90% lit. An illumination
-    threshold of 0.85 would open the window three days early; distance to the
-    syzygy does not.
+    Roughly 4 days before full the moon is still over 80% lit. An illumination
+    threshold would open the window early; distance to the syzygy does not.
     """
     full = _date_of_next("full", ANCHOR)
     day = lunar_day(full - timedelta(days=4), JAKARTA)
 
     assert day.illumination > 0.80
     assert day.window is None
+
+
+def test_illumination_is_similar_on_both_window_edges():
+    """Why illumination cannot express this window at all.
+
+    The window is asymmetric in time, but illumination is near-symmetric about
+    the peak - so no single cutoff can open at -3 days and close at +2.
+    """
+    before = _day_where("full", lambda value: 2.0 < value <= 3.0)
+    after = _day_where("full", lambda value: -3.0 <= value < -2.0)
+
+    assert abs(before.illumination - after.illumination) < 0.05
+    assert before.window == "full"
+    assert after.window is None
 
 
 # --- alerts -----------------------------------------------------------------
@@ -140,6 +192,17 @@ def test_alert_is_quiet_well_before_the_lead_window():
     assert day.alert is None
 
 
+def test_dosing_is_prompted_as_soon_as_the_window_opens():
+    """No dead band: entering the window and being told to dose coincide."""
+    assert LEAD_DAYS >= FULL_DAYS_BEFORE
+    assert LEAD_DAYS >= NEW_DAYS_BEFORE
+
+    day = _day_where("full", lambda value: 2.0 < value <= 3.0)
+
+    assert day.window == "full"
+    assert day.alert == "full"
+
+
 # --- timezone handling ------------------------------------------------------
 
 
@@ -147,7 +210,7 @@ def test_neighbouring_zones_agree_on_the_window():
     """Guards the naive-UTC conversion inside lunar_day."""
     full = _date_of_next("full", ANCHOR)
 
-    for offset in (-2, -1, 0, 1, 2):
+    for offset in (-2, -1, 0, 1):
         day = full + timedelta(days=offset)
         assert (
             lunar_day(day, "Asia/Jakarta").window

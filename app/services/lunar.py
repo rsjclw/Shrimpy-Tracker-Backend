@@ -18,14 +18,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import ephem
 
-# Half-width either side of the exact syzygy. 2.5 d reproduces the five-day
-# "13th-17th" and "28th-2nd" windows operators used to read off the Hijri
-# calendar, without inheriting that calendar's 1-2 day drift.
-FULL_HALF_WIDTH_DAYS = 2.5
-NEW_HALF_WIDTH_DAYS = 2.5
+# Window width either side of the exact syzygy, in days. Deliberately
+# asymmetric: molting builds through the run-up and tails off afterwards, so
+# the window reaches further before the peak than after it.
+FULL_DAYS_BEFORE = 3.0
+FULL_DAYS_AFTER = 2.0
+NEW_DAYS_BEFORE = 3.0
+NEW_DAYS_AFTER = 2.0
 
-# Lime and minerals need to be up before the molt, not during it.
-LEAD_DAYS = 2.0
+# Lime and minerals need to be up before the molt starts, not during it, so
+# dosing is prompted from the moment the window opens.
+LEAD_DAYS = 3.0
 
 FULL = "full"
 NEW = "new"
@@ -56,6 +59,11 @@ def _signed_days_to_nearest(t: ephem.Date, previous, following) -> float:
     return ahead if ahead <= behind else -behind
 
 
+def _in_window(days_to: float, before: float, after: float) -> bool:
+    """`days_to` counts down to the syzygy, then goes negative past it."""
+    return -after <= days_to <= before
+
+
 def lunar_day(day: ddate, tz: str) -> LunarDay:
     """Moon state for a calendar date in a given IANA timezone."""
     # Local noon is a neutral point inside the date. The window classification
@@ -75,9 +83,9 @@ def lunar_day(day: ddate, tz: str) -> LunarDay:
     waxing = float(ephem.next_full_moon(t) - t) < float(ephem.next_new_moon(t) - t)
 
     window: str | None = None
-    if abs(days_to_full) <= FULL_HALF_WIDTH_DAYS:
+    if _in_window(days_to_full, FULL_DAYS_BEFORE, FULL_DAYS_AFTER):
         window = FULL
-    elif abs(days_to_new) <= NEW_HALF_WIDTH_DAYS:
+    elif _in_window(days_to_new, NEW_DAYS_BEFORE, NEW_DAYS_AFTER):
         window = NEW
 
     # Local noon is the reference, so the syzygy lands on this date when it is
