@@ -10,9 +10,15 @@ from app.schemas.day import (
     DayMetrics,
     DaySummary,
     DayView,
+    LunarDayOut,
     SamplingMetrics,
     TrendPoint,
     TrendSeries,
+)
+from app.schemas.environment import (
+    DayEnvironmentOut,
+    EnvironmentRefreshOut,
+    GridEnvironmentOut,
 )
 from app.schemas.feeding import FeedingCreate, FeedingFeedType, FeedingOut, FeedingUpdate
 from app.schemas.feed_type import FeedTypeCreate, FeedTypeOut, FeedTypeUpdate
@@ -68,6 +74,10 @@ __all__ = [
     "DayView",
     "DaySummary",
     "DayMetrics",
+    "DayEnvironmentOut",
+    "EnvironmentRefreshOut",
+    "GridEnvironmentOut",
+    "LunarDayOut",
     "SamplingMetrics",
     "TrendPoint",
     "TrendSeries",

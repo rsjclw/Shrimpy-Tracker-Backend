@@ -1,6 +1,7 @@
 from app.models.entities import (
     BlindFeedingTemplate,
     Cycle,
+    DailyEnvironment,
     DailyLog,
     Farm,
     FarmMembership,
@@ -20,6 +21,7 @@ __all__ = [
     "BlindFeedingTemplate",
     "Pond",
     "Cycle",
+    "DailyEnvironment",
     "DailyLog",
     "Farm",
     "FarmMembership",

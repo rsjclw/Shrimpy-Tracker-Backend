@@ -5,6 +5,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, ConfigDict
 
+from app.schemas.environment import DayEnvironmentOut
 from app.schemas.feeding import FeedingOut
 from app.schemas.feeding import FeedingFeedType
 from app.schemas.harvest import HarvestOut
@@ -31,6 +32,18 @@ class DayMetrics(BaseModel):
     estimated_biomass_kg: Decimal | None
     harvest_biomass_kg: Decimal
     fcr: Decimal | None
+
+
+class LunarDayOut(BaseModel):
+    """Moon state for the date. Derived, never stored."""
+
+    illumination: float  # 0.0-1.0, display only
+    waxing: bool
+    days_to_full: float  # signed; negative means the full moon has passed
+    days_to_new: float
+    window: str | None  # "full" | "new" | None
+    is_peak: bool
+    alert: str | None  # "full" | "new" while approaching the peak
 
 
 class SamplingMetrics(BaseModel):
@@ -69,6 +82,9 @@ class DayView(BaseModel):
     water: WaterParametersOut | None
     treatments: list[TreatmentOut]
     metrics: DayMetrics
+    lunar: LunarDayOut
+    # None when the grid has no coordinates, or the day is not cached yet.
+    environment: DayEnvironmentOut | None = None
 
 
 class TrendPoint(BaseModel):

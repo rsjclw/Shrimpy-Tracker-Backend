@@ -190,6 +190,17 @@ async def farm_id_for_cycle(db: AsyncSession, cycle_id: UUID | str) -> UUID:
     return farm_id
 
 
+async def grid_for_cycle(db: AsyncSession, cycle_id: UUID | str) -> Grid | None:
+    """The grid a cycle sits under - its timezone and cached weather."""
+    result = await db.execute(
+        select(Grid)
+        .join(Pond, Pond.grid_id == Grid.id)
+        .join(Cycle, Cycle.pond_id == Pond.id)
+        .where(Cycle.id == cycle_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def require_cycle_permission(
     db: AsyncSession, user: CurrentUser, cycle_id: UUID | str, permission: str = "read"
 ) -> FarmAccess:

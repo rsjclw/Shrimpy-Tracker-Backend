@@ -3,6 +3,7 @@ from datetime import date, datetime, time
 from decimal import Decimal
 
 from sqlalchemy import (
+    Boolean,
     Date,
     DateTime,
     ForeignKey,
@@ -33,10 +34,20 @@ class Grid(Base):
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(9, 6))
+    # Both resolved from the coordinates by Open-Meteo's timezone=auto, then
+    # cached here. The lunar windows and the weather schedule both read this.
+    timezone: Mapped[str | None] = mapped_column(String(64))
+    elevation_m: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    weather_synced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     farm: Mapped["Farm"] = relationship(back_populates="grids")
     ponds: Mapped[list["Pond"]] = relationship(back_populates="grid", cascade="all, delete-orphan")
+    environment: Mapped[list["DailyEnvironment"]] = relationship(
+        back_populates="grid", cascade="all, delete-orphan"
+    )
 
 
 class Farm(Base):
@@ -276,6 +287,40 @@ class FeedType(Base):
     price_per_kg: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class DailyEnvironment(Base):
+    """Cached daily weather for a grid.
+
+    Keyed by grid rather than daily_log: every pond and cycle under a grid
+    shares the same weather, so hanging it off daily logs would duplicate the
+    same values per cycle and let the copies drift apart.
+    """
+
+    __tablename__ = "daily_environment"
+    __table_args__ = (UniqueConstraint("grid_id", "date", name="uq_daily_environment_grid_date"),)
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    grid_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("grids.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    temp_min_c: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    temp_max_c: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    temp_mean_c: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    # Global horizontal irradiance: the solar energy actually landing on the
+    # pond surface. This is the "how much sun" number, not cloud cover.
+    shortwave_radiation_sum_mj: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    sunshine_duration_hours: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    cloud_cover_daylight_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    precipitation_mm: Mapped[Decimal | None] = mapped_column(Numeric(7, 2))
+    precipitation_hours: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    precipitation_probability_max_pct: Mapped[Decimal | None] = mapped_column(Numeric(5, 2))
+    is_forecast: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="open-meteo")
+    fetched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+    grid: Mapped[Grid] = relationship(back_populates="environment")
 
 
 class BlindFeedingTemplate(Base):

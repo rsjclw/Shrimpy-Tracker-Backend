@@ -11,18 +11,23 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.models import Cycle, DailyLog, FeedType, FeedingSession, Grid, Harvest, Pond, PopulationSample, WaterParameters
+from app.config import settings
+from app.models import Cycle, DailyEnvironment, DailyLog, FeedType, FeedingSession, Grid, Harvest, Pond, PopulationSample, WaterParameters
 from app.schemas import (
+    DayEnvironmentOut,
     DayMetrics,
     DaySummary,
     DayView,
     FeedingFeedType,
     FeedingOut,
     HarvestOut,
+    LunarDayOut,
     SamplingMetrics,
     TreatmentOut,
     WaterParametersOut,
 )
+from app.services.access import grid_for_cycle
+from app.services.lunar import lunar_day
 from app.schemas.water import BIOLOGY_COMPUTED_FIELDS, BIOLOGY_SOURCE_FIELDS, water_metric_value
 from app.services import metrics as M
 
@@ -245,6 +250,21 @@ async def _default_feed_types(db: AsyncSession, cycle: Cycle, target: ddate) -> 
     ]
 
 
+async def _environment_for(
+    db: AsyncSession, grid: Grid | None, target: ddate
+) -> DayEnvironmentOut | None:
+    """Cached weather for the date, or None when it was never fetched."""
+    if grid is None:
+        return None
+    result = await db.execute(
+        select(DailyEnvironment).where(
+            DailyEnvironment.grid_id == grid.id, DailyEnvironment.date == target
+        )
+    )
+    row = result.scalar_one_or_none()
+    return DayEnvironmentOut.model_validate(row) if row else None
+
+
 async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView:
     """Returns the full day view (or empty shell if no daily_log yet)."""
     result = await db.execute(
@@ -263,6 +283,10 @@ async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView
     metrics = _compute_metrics(cycle, target, feedings_all, samples, abw_history, harvests_all)
     sampling = _compute_sampling_metrics(target, feedings_all, samples, abw_history, harvests_all, cycle)
     default_feed_types = await _default_feed_types(db, cycle, target)
+    grid = await grid_for_cycle(db, cycle.id)
+    tz = (grid.timezone if grid else None) or settings.default_timezone
+    lunar = LunarDayOut(**vars(lunar_day(target, tz)))
+    environment = await _environment_for(db, grid, target)
 
     if not log:
         return DayView(
@@ -279,6 +303,8 @@ async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView
             water=None,
             treatments=[],
             metrics=metrics,
+            lunar=lunar,
+            environment=environment,
         )
 
     return DayView(
@@ -301,6 +327,8 @@ async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView
         water=WaterParametersOut.model_validate(log.water) if log.water else None,
         treatments=[TreatmentOut.model_validate(t) for t in log.treatments],
         metrics=metrics,
+        lunar=lunar,
+        environment=environment,
     )
 
 
