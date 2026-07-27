@@ -371,6 +371,21 @@ METRIC_EXTRACTORS = {
     "fcr": lambda m: m.fcr,
 }
 
+# Cached grid weather, trendable alongside the pond's own parameters. Stored
+# per grid rather than per daily log, so these are resolved through the cycle's
+# grid instead of its daily logs - see _environment_for.
+ENVIRONMENT_METRICS = (
+    "temp_min_c",
+    "temp_mean_c",
+    "temp_max_c",
+    "shortwave_radiation_sum_mj",
+    "sunshine_duration_hours",
+    "cloud_cover_daylight_pct",
+    "precipitation_mm",
+    "precipitation_hours",
+    "precipitation_probability_max_pct",
+)
+
 WATER_METRICS = (
     "do_am",
     "do_pm",
@@ -389,6 +404,12 @@ WATER_METRICS = (
     *BIOLOGY_COMPUTED_FIELDS,
 )
 
+# Everything /cycles/{id}/trends will plot. sample_fcr is computed per day from
+# the sampling card rather than from DayMetrics, so it is listed on its own.
+TREND_METRICS = frozenset(
+    {*METRIC_EXTRACTORS, *WATER_METRICS, *ENVIRONMENT_METRICS, "sample_fcr"}
+)
+
 
 async def get_trend(
     db: AsyncSession,
@@ -397,14 +418,28 @@ async def get_trend(
     date_from: ddate,
     date_to: ddate,
 ) -> list[tuple[ddate, Decimal | None]]:
-    if (
-        metric not in METRIC_EXTRACTORS
-        and metric not in WATER_METRICS
-        and metric not in {"sample_fcr"}
-    ):
+    if metric not in TREND_METRICS:
         raise ValueError(f"Unknown metric: {metric}")
 
     points: list[tuple[ddate, Decimal | None]] = []
+
+    if metric in ENVIRONMENT_METRICS:
+        grid = await grid_for_cycle(db, cycle.id)
+        values: dict[ddate, Decimal | None] = {}
+        if grid is not None:
+            result = await db.execute(
+                select(DailyEnvironment.date, getattr(DailyEnvironment, metric)).where(
+                    DailyEnvironment.grid_id == grid.id,
+                    DailyEnvironment.date >= date_from,
+                    DailyEnvironment.date <= date_to,
+                )
+            )
+            values = {row[0]: row[1] for row in result.all()}
+        current = date_from
+        while current <= date_to:
+            points.append((current, values.get(current)))
+            current = ddate.fromordinal(current.toordinal() + 1)
+        return points
 
     if metric in WATER_METRICS:
         result = await db.execute(

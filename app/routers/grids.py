@@ -18,6 +18,7 @@ from app.schemas import (
 from app.services import weather
 from app.services.access import accessible_farm_ids, require_farm_permission, require_grid_permission
 from app.services.common import get_or_404
+from app.services.weather_sync import earliest_needed_date
 
 router = APIRouter(prefix="/grids", tags=["grids"])
 
@@ -130,6 +131,11 @@ async def refresh_grid_environment(
             status.HTTP_400_BAD_REQUEST, "Grid has no coordinates set"
         )
     days_written = await weather.sync_grid(db, grid)
+    # Same gap fill the scheduled sweep does, so an operator who just set the
+    # coordinates gets the whole cycle's history without waiting for 05:00.
+    start = await earliest_needed_date(db, grid)
+    if start is not None:
+        days_written += await weather.backfill_missing(db, grid, start)
     await db.commit()
     await db.refresh(grid)
     return EnvironmentRefreshOut(

@@ -8,15 +8,15 @@ sleep-until-the-hour design gives you.
 """
 import asyncio
 import logging
-from datetime import datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import SessionLocal
-from app.models import Grid
+from app.models import Cycle, Grid, Pond
 from app.services import weather
 
 logger = logging.getLogger(__name__)
@@ -71,6 +71,20 @@ def is_due(grid: Grid, now: datetime, hours: list[int]) -> bool:
     return synced < most_recent_slot(now, grid.timezone, hours)
 
 
+async def earliest_needed_date(db: AsyncSession, grid: Grid) -> date | None:
+    """Start of the oldest cycle under this grid - how far back weather matters.
+
+    A trend is plotted per cycle, so there is nothing to say about the days
+    before the grid's first stocking.
+    """
+    result = await db.execute(
+        select(func.min(Cycle.start_date))
+        .join(Pond, Pond.id == Cycle.pond_id)
+        .where(Pond.grid_id == grid.id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def _acquire_lock(db: AsyncSession) -> bool:
     """Session-scoped advisory lock so multiple containers don't double-fetch."""
     result = await db.execute(
@@ -106,6 +120,11 @@ async def sweep_once() -> int:
                     continue
                 if await weather.sync_grid(db, grid):
                     synced += 1
+                # The forecast call only reaches 7 days back; anything older
+                # that is still missing comes from the archive.
+                start = await earliest_needed_date(db, grid)
+                if start is not None:
+                    await weather.backfill_missing(db, grid, start)
             await db.commit()
         finally:
             await _release_lock(db)

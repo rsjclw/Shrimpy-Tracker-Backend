@@ -10,11 +10,12 @@ carries the required attribution.
 import logging
 from dataclasses import dataclass
 from datetime import date as ddate
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
+from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,6 +43,13 @@ HOURLY_FIELDS = ("cloud_cover", "shortwave_radiation")
 PAST_DAYS = 7
 FORECAST_DAYS = 16
 REQUEST_TIMEOUT = 20
+
+# ERA5 reanalysis trails real time by about five days; asking for anything
+# newer than this just returns nulls we would re-request on every sweep.
+ARCHIVE_LAG_DAYS = 6
+# A cycle runs a few months. Two years is a generous ceiling that still keeps a
+# first-ever backfill to one archive call.
+MAX_BACKFILL_DAYS = 730
 
 
 @dataclass(frozen=True)
@@ -218,16 +226,28 @@ async def fetch_archive(
 
 
 async def _store(
-    db: AsyncSession, grid: Grid, result: WeatherResult, source: str
+    db: AsyncSession,
+    grid: Grid,
+    result: WeatherResult,
+    source: str,
+    only_dates: set[ddate] | None = None,
 ) -> int:
-    """Upsert rows and refresh the grid's resolved location metadata."""
+    """Upsert rows and refresh the grid's resolved location metadata.
+
+    `only_dates` restricts the write to a subset, so a gap fill cannot replace
+    an existing open-meteo actual with the ERA5 reading of the same day.
+    """
     if result.timezone and result.timezone != grid.timezone:
         grid.timezone = result.timezone
     if result.elevation_m is not None and result.elevation_m != grid.elevation_m:
         grid.elevation_m = result.elevation_m
 
     now = datetime.now(timezone.utc)
+    written = 0
     for row in result.rows:
+        if only_dates is not None and row.date not in only_dates:
+            continue
+        written += 1
         values = {
             "grid_id": grid.id,
             "source": source,
@@ -264,7 +284,7 @@ async def _store(
 
     grid.weather_synced_at = now
     await db.flush()
-    return len(result.rows)
+    return written
 
 
 async def sync_grid(db: AsyncSession, grid: Grid, past_days: int = PAST_DAYS) -> int:
@@ -287,6 +307,56 @@ async def backfill_grid(
     if result is None:
         return 0
     return await _store(db, grid, result, "era5")
+
+
+async def missing_dates(
+    db: AsyncSession, grid: Grid, date_from: ddate, date_to: ddate
+) -> set[ddate]:
+    """Dates in the window with no cached row yet."""
+    if date_to < date_from:
+        return set()
+    stored = await db.execute(
+        select(DailyEnvironment.date).where(
+            DailyEnvironment.grid_id == grid.id,
+            DailyEnvironment.date >= date_from,
+            DailyEnvironment.date <= date_to,
+        )
+    )
+    have = set(stored.scalars().all())
+    wanted = {
+        ddate.fromordinal(day)
+        for day in range(date_from.toordinal(), date_to.toordinal() + 1)
+    }
+    return wanted - have
+
+
+async def backfill_missing(db: AsyncSession, grid: Grid, date_from: ddate) -> int:
+    """Fill any archive-age holes from `date_from` up to the ERA5 horizon.
+
+    The twice-daily sync only reaches 7 days back, so a grid whose coordinates
+    were set mid-cycle - or one whose container was down for a week - would
+    plot a trend line that just stops. This closes those holes on the next
+    sweep and then costs one cheap date query per sweep once there are none.
+
+    Only the missing dates are written, so ERA5 never overwrites an open-meteo
+    actual that is already cached.
+    """
+    if grid.latitude is None or grid.longitude is None:
+        return 0
+
+    today = _local_today(grid.timezone)
+    date_to = today - timedelta(days=ARCHIVE_LAG_DAYS)
+    date_from = max(date_from, today - timedelta(days=MAX_BACKFILL_DAYS))
+    gaps = await missing_dates(db, grid, date_from, date_to)
+    if not gaps:
+        return 0
+
+    result = await fetch_archive(grid.latitude, grid.longitude, min(gaps), max(gaps))
+    if result is None:
+        return 0
+    written = await _store(db, grid, result, "era5", only_dates=gaps)
+    logger.info("Backfilled %d weather day(s) for grid %s", written, grid.id)
+    return written
 
 
 async def resolve_location(db: AsyncSession, grid: Grid) -> None:

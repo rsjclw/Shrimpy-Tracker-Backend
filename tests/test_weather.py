@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.models import DailyEnvironment
+from app.services.day_view import ENVIRONMENT_METRICS, TREND_METRICS
 from app.services.weather import parse_forecast
 from app.services.weather_sync import is_due, most_recent_slot, sync_hours
 
@@ -241,3 +243,24 @@ def test_naive_synced_at_is_treated_as_utc_not_crashed_on():
 @pytest.mark.parametrize("missing", ["latitude", "longitude"])
 def test_a_grid_without_coordinates_is_never_due(missing):
     assert not is_due(_grid(**{missing: None}), NOW, [5, 17])
+
+
+# --- weather as a trend metric ----------------------------------------------
+
+
+@pytest.mark.parametrize("metric", ENVIRONMENT_METRICS)
+def test_every_weather_trend_metric_is_a_real_column(metric):
+    """The trend query reads these by getattr - a typo would 500 at runtime."""
+    assert hasattr(DailyEnvironment, metric)
+
+
+def test_the_three_temperatures_are_trendable_side_by_side():
+    assert {"temp_min_c", "temp_mean_c", "temp_max_c"} <= TREND_METRICS
+
+
+def test_weather_metrics_do_not_collide_with_pond_metrics():
+    """Weather resolves through the grid, water through the daily log."""
+    from app.services.day_view import METRIC_EXTRACTORS, WATER_METRICS
+
+    assert not set(ENVIRONMENT_METRICS) & set(WATER_METRICS)
+    assert not set(ENVIRONMENT_METRICS) & set(METRIC_EXTRACTORS)
