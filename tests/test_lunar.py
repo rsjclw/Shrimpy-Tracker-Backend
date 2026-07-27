@@ -107,16 +107,16 @@ def test_window_covers_the_days_around_the_peak(kind, expected):
 
 
 @pytest.mark.parametrize("kind", ["full", "new"])
-def test_window_is_closed_four_days_out(kind):
+def test_window_is_closed_outside_its_own_edges(kind):
     peak = _date_of_next(kind, ANCHOR)
 
-    assert lunar_day(peak - timedelta(days=4), JAKARTA).window != kind
+    assert lunar_day(peak - timedelta(days=5), JAKARTA).window != kind
     assert lunar_day(peak + timedelta(days=4), JAKARTA).window != kind
 
 
 @pytest.mark.parametrize("kind", ["full", "new"])
-def test_window_reaches_three_days_before_the_peak(kind):
-    day = _day_where(kind, lambda value: 2.0 < value <= 3.0)
+def test_window_reaches_four_days_before_the_peak(kind):
+    day = _day_where(kind, lambda value: 3.0 < value <= 4.0)
 
     assert day.window == kind
 
@@ -148,28 +148,31 @@ def test_window_edges_follow_the_constants_not_illumination():
 def test_a_high_illumination_day_outside_the_window_is_not_flagged():
     """The regression this design exists to prevent.
 
-    Roughly 4 days before full the moon is still over 80% lit. An illumination
-    threshold would open the window early; distance to the syzygy does not.
+    Roughly 5 days before full the moon is still around 70% lit, and 2 days
+    after it is over 90% - yet the first is outside the window and the second
+    inside. No illumination cutoff can order those two correctly.
     """
     full = _date_of_next("full", ANCHOR)
-    day = lunar_day(full - timedelta(days=4), JAKARTA)
+    day = lunar_day(full - timedelta(days=5), JAKARTA)
 
-    assert day.illumination > 0.80
+    assert day.illumination > 0.60
     assert day.window is None
 
 
-def test_illumination_is_similar_on_both_window_edges():
+def test_illumination_ranks_the_window_edges_backwards():
     """Why illumination cannot express this window at all.
 
-    The window is asymmetric in time, but illumination is near-symmetric about
-    the peak - so no single cutoff can open at -3 days and close at +2.
+    The window opens 4 days before the peak and closes 2 days after it. At the
+    opening edge the moon is around 82% lit; just past the closing edge it is
+    around 94%. The day inside the window is dimmer than the day outside it, so
+    any illumination cutoff would admit exactly the wrong one.
     """
-    before = _day_where("full", lambda value: 2.0 < value <= 3.0)
-    after = _day_where("full", lambda value: -3.0 <= value < -2.0)
+    opening = _day_where("full", lambda value: 3.0 < value <= 4.0)
+    just_closed = _day_where("full", lambda value: -3.0 <= value < -2.0)
 
-    assert abs(before.illumination - after.illumination) < 0.05
-    assert before.window == "full"
-    assert after.window is None
+    assert opening.window == "full"
+    assert just_closed.window is None
+    assert opening.illumination < just_closed.illumination
 
 
 # --- alerts -----------------------------------------------------------------
@@ -180,13 +183,13 @@ def test_alert_fires_on_the_approach_only(kind):
     peak = _date_of_next(kind, ANCHOR)
 
     assert lunar_day(peak - timedelta(days=2), JAKARTA).alert == kind
-    # The tail of a window is not a cue to start dosing.
+    # The tail of a window is not part of the run-up.
     assert lunar_day(peak + timedelta(days=2), JAKARTA).alert is None
 
 
 def test_alert_is_quiet_well_before_the_lead_window():
     full = _date_of_next("full", ANCHOR)
-    day = lunar_day(full - timedelta(days=5), JAKARTA)
+    day = lunar_day(full - timedelta(days=6), JAKARTA)
 
     assert day.days_to_full > LEAD_DAYS
     assert day.alert is None
@@ -197,7 +200,7 @@ def test_dosing_is_prompted_as_soon_as_the_window_opens():
     assert LEAD_DAYS >= FULL_DAYS_BEFORE
     assert LEAD_DAYS >= NEW_DAYS_BEFORE
 
-    day = _day_where("full", lambda value: 2.0 < value <= 3.0)
+    day = _day_where("full", lambda value: 3.0 < value <= 4.0)
 
     assert day.window == "full"
     assert day.alert == "full"

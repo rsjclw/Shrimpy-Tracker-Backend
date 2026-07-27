@@ -21,14 +21,14 @@ import ephem
 # Window width either side of the exact syzygy, in days. Deliberately
 # asymmetric: molting builds through the run-up and tails off afterwards, so
 # the window reaches further before the peak than after it.
-FULL_DAYS_BEFORE = 3.0
+FULL_DAYS_BEFORE = 4.0
 FULL_DAYS_AFTER = 2.0
-NEW_DAYS_BEFORE = 3.0
+NEW_DAYS_BEFORE = 4.0
 NEW_DAYS_AFTER = 2.0
 
-# Lime and minerals need to be up before the molt starts, not during it, so
-# dosing is prompted from the moment the window opens.
-LEAD_DAYS = 3.0
+# Minerals need to be up before molting starts, not once it is underway, so the
+# run-up is flagged from the moment the window opens.
+LEAD_DAYS = 4.0
 
 FULL = "full"
 NEW = "new"
