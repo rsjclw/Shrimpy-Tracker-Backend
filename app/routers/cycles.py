@@ -132,6 +132,18 @@ def _cycle_payload(payload: CycleCreate | CycleUpdate, exclude_unset: bool = Fal
     return data
 
 
+def _closed_cycle_end_date(cycle: Cycle, today: ddate) -> ddate | None:
+    """Return the last plottable date for a closed cycle."""
+    if cycle.status == "active":
+        return cycle.actual_end_date
+
+    # Older completed cycles may predate actual_end_date being maintained.
+    # Their planned end is the best available boundary. Never let a closed
+    # cycle extend into the future, even if that planned date is still ahead.
+    end_date = cycle.actual_end_date or cycle.planned_end_date or today
+    return min(end_date, today)
+
+
 async def _pond_farm_id(db: AsyncSession, pond_id: UUID) -> UUID:
     result = await db.execute(
         select(Grid.farm_id).join(Pond, Pond.grid_id == Grid.id).where(Pond.id == pond_id)
@@ -245,7 +257,22 @@ async def update_cycle(
 ) -> Cycle:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
-    for key, value in _cycle_payload(payload, exclude_unset=True).items():
+    data = _cycle_payload(payload, exclude_unset=True)
+    next_status = data.get("status", cycle.status)
+
+    # Closing a cycle must establish a durable end date. For a planned end in
+    # the past, use that as the fallback; otherwise the close happened today.
+    # Reopening clears an automatically maintained end unless the caller
+    # explicitly supplied one.
+    if "actual_end_date" not in data:
+        if next_status != "active" and cycle.actual_end_date is None:
+            today = datetime.now(timezone.utc).date()
+            planned_end = data.get("planned_end_date", cycle.planned_end_date)
+            data["actual_end_date"] = min(planned_end, today) if planned_end else today
+        elif next_status == "active" and cycle.status != "active":
+            data["actual_end_date"] = None
+
+    for key, value in data.items():
         setattr(cycle, key, value)
     await db.commit()
     await db.refresh(cycle)
@@ -324,13 +351,15 @@ async def get_cycle_trend(
 ) -> TrendSeries:
     await require_cycle_permission(db, user, cycle_id)
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    today = datetime.now(timezone.utc).date()
+    cycle_end = _closed_cycle_end_date(cycle, today)
+    effective_to = min(date_to, cycle_end) if cycle_end else date_to
     try:
-        raw = await get_trend(db, cycle, metric, date_from, date_to)
+        raw = await get_trend(db, cycle, metric, date_from, effective_to)
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    today = datetime.now(timezone.utc).date()
-    sampling_dates = await get_sampling_dates(db, cycle, date_from, date_to)
-    harvest_dates = await get_harvest_dates(db, cycle, date_from, date_to)
+    sampling_dates = await get_sampling_dates(db, cycle, date_from, effective_to)
+    harvest_dates = await get_harvest_dates(db, cycle, date_from, effective_to)
     points = [
         TrendPoint(
             date=d,
