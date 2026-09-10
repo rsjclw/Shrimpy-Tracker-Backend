@@ -100,6 +100,7 @@ class Pond(Base):
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    default_feed_time: Mapped[time] = mapped_column(Time, nullable=False, default=time(6, 0))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     grid: Mapped[Grid] = relationship(back_populates="ponds")

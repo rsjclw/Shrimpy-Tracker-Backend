@@ -107,6 +107,7 @@ from app.services.access import (
 )
 from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
+from app.services.feeding_schedule import feeding_sessions_for
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
 from app.services.prediction_jobs import (
     get_latest_active_prediction_job,
@@ -116,12 +117,6 @@ from app.services.prediction_jobs import (
 )
 
 router = APIRouter(prefix="/cycles", tags=["cycles"])
-_BLIND_FEEDING_SESSIONS = [
-    (dtime(6, 0), Decimal("0.25")),
-    (dtime(10, 0), Decimal("0.30")),
-    (dtime(14, 0), Decimal("0.30")),
-    (dtime(18, 0), Decimal("0.15")),
-]
 
 
 def _cycle_payload(payload: CycleCreate | CycleUpdate, exclude_unset: bool = False) -> dict:
@@ -144,14 +139,16 @@ def _closed_cycle_end_date(cycle: Cycle, today: ddate) -> ddate | None:
     return min(end_date, today)
 
 
-async def _pond_farm_id(db: AsyncSession, pond_id: UUID) -> UUID:
+async def _pond_farm_id_and_feed_time(db: AsyncSession, pond_id: UUID) -> tuple[UUID, dtime]:
     result = await db.execute(
-        select(Grid.farm_id).join(Pond, Pond.grid_id == Grid.id).where(Pond.id == pond_id)
+        select(Grid.farm_id, Pond.default_feed_time)
+        .join(Pond, Pond.grid_id == Grid.id)
+        .where(Pond.id == pond_id)
     )
-    farm_id = result.scalar_one_or_none()
-    if farm_id is None:
+    row = result.one_or_none()
+    if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Pond not found")
-    return farm_id
+    return row
 
 
 async def _get_cycle_template(
@@ -172,11 +169,12 @@ def _blind_feeding_amount(rate_per_100k: float, population: int) -> Decimal:
     return round_feed_amount_kg(amount)
 
 
-def _add_blind_feedings(cycle: Cycle, template: BlindFeedingTemplate) -> None:
+def _add_blind_feedings(cycle: Cycle, template: BlindFeedingTemplate, anchor_feed_time: dtime) -> None:
+    sessions = feeding_sessions_for(anchor_feed_time)
     for day_index, rate in enumerate(template.daily_feed_per_100k):
         total = _blind_feeding_amount(rate, cycle.initial_population)
         log = DailyLog(cycle=cycle, date=cycle.start_date + timedelta(days=day_index))
-        for feed_time, fraction in _BLIND_FEEDING_SESSIONS:
+        for feed_time, fraction in sessions:
             log.feedings.append(
                 FeedingSession(
                     feed_time=feed_time,
@@ -226,12 +224,12 @@ async def create_cycle(
     user: CurrentUser = Depends(get_current_user),
 ) -> Cycle:
     await require_pond_permission(db, user, payload.pond_id, "add")
-    farm_id = await _pond_farm_id(db, payload.pond_id)
+    farm_id, default_feed_time = await _pond_farm_id_and_feed_time(db, payload.pond_id)
     template = await _get_cycle_template(db, payload.blind_feeding_template_id, farm_id)
     data = _cycle_payload(payload)
     cycle = Cycle(**data)
     if template:
-        _add_blind_feedings(cycle, template)
+        _add_blind_feedings(cycle, template, default_feed_time)
     db.add(cycle)
     await db.commit()
     await db.refresh(cycle)
@@ -380,7 +378,7 @@ async def get_cycle_prediction_baseline(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> PredictionBaselineOut:
-    await require_cycle_permission(db, user, cycle_id)
+    await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     baseline = await get_prediction_baseline(db, cycle, start_date)
     return PredictionBaselineOut(**baseline)
@@ -393,7 +391,7 @@ async def preview_cycle_prediction(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> PredictionResultOut:
-    await require_cycle_permission(db, user, cycle_id)
+    await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     try:
         return await preview_prediction(
@@ -414,7 +412,7 @@ async def start_cycle_prediction_preview_job(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> PredictionJobOut:
-    await require_cycle_permission(db, user, cycle_id)
+    await require_cycle_permission(db, user, cycle_id, "manage")
     await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     return start_prediction_job(cycle_id, user.id, payload)
 

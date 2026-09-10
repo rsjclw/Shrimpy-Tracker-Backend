@@ -21,17 +21,13 @@ from app.schemas.prediction import (
 from app.services import prediction_core as core
 from app.services.day_view import get_prediction_baseline
 from app.services.feeding_amounts import round_feed_amount_kg
+from app.services.feeding_schedule import DEFAULT_FEED_TIME, feeding_sessions_for
 
 # Prediction simulation runs on the vendored source-of-truth algorithm in
 # prediction_core (kept byte-identical to simulation/predict.py). This module
 # only adapts DB rows -> core.Config and core results -> API schemas.
 HARVEST_TIME = dtime(5, 0)
-FEEDING_SPLIT = (
-    (dtime(6, 0), Decimal("0.25")),
-    (dtime(10, 0), Decimal("0.30")),
-    (dtime(14, 0), Decimal("0.30")),
-    (dtime(18, 0), Decimal("0.15")),
-)
+FEEDING_SPLIT = feeding_sessions_for(DEFAULT_FEED_TIME)
 
 DEFAULT_CONFIG = {
     "cycle": {"preparation_day": 20, "maximum_shrimp_size_g": 100},
@@ -143,6 +139,12 @@ async def _farm_and_area(db: AsyncSession, cycle: Cycle) -> tuple[UUID, Decimal]
     if area_m2 is None or area_m2 <= 0:
         raise PredictionError("Pond area is required for prediction")
     return farm_id, area_m2
+
+
+async def _pond_feed_time(db: AsyncSession, cycle: Cycle) -> dtime:
+    result = await db.execute(select(Pond.default_feed_time).where(Pond.id == cycle.pond_id))
+    feed_time = result.scalar_one_or_none()
+    return feed_time or DEFAULT_FEED_TIME
 
 
 async def _cumulative_feed_before(db: AsyncSession, cycle_id: UUID, start_date: ddate) -> Decimal:
@@ -320,7 +322,11 @@ def _feed_type_out(feed: FeedPlanRow) -> list[FeedingFeedType]:
     ]
 
 
-def _feedings_for_row(row: core.DailyResult, feed_by_name: dict[str, FeedPlanRow]) -> list[PredictionFeedingOut]:
+def _feedings_for_row(
+    row: core.DailyResult,
+    feed_by_name: dict[str, FeedPlanRow],
+    feeding_split: tuple[tuple[dtime, Decimal], ...] = FEEDING_SPLIT,
+) -> list[PredictionFeedingOut]:
     feed = feed_by_name.get(row.feed_name)
     if feed is None or row.actual_feed_kg <= 0:
         return []
@@ -331,7 +337,7 @@ def _feedings_for_row(row: core.DailyResult, feed_by_name: dict[str, FeedPlanRow
             amount_kg=round_feed_amount_kg(Decimal(str(row.actual_feed_kg)) * fraction),
             feed_types=feed_types,
         )
-        for feed_time, fraction in FEEDING_SPLIT
+        for feed_time, fraction in feeding_split
     ]
 
 
@@ -355,8 +361,10 @@ def result_to_out(
     result: core.SimulationResult,
     feed_plan: list[FeedPlanRow],
     generated: PredictionGeneratedCounts | None = None,
+    feed_time: dtime = DEFAULT_FEED_TIME,
 ) -> PredictionResultOut:
     feed_by_name = {feed.name: feed for feed in feed_plan}
+    feeding_split = tuple(feeding_sessions_for(feed_time))
     daily_rows = [
         PredictionDailyRowOut(
             date=_date_for_doc(cycle_start_date, row.doc),
@@ -369,13 +377,13 @@ def result_to_out(
             ending_abw_g=_decimal(row.ending_abw_g, "0.0001"),
             starting_biomass_kg=_decimal(row.starting_biomass_kg),
             ending_biomass_kg=_decimal(row.ending_biomass_kg),
-            actual_feed_kg=sum((feeding.amount_kg for feeding in _feedings_for_row(row, feed_by_name)), Decimal("0")),
+            actual_feed_kg=sum((feeding.amount_kg for feeding in _feedings_for_row(row, feed_by_name, feeding_split)), Decimal("0")),
             cumulative_feed_kg=_decimal(row.cumulative_feed_kg),
             count_size=_decimal(row.count_size, "0.01"),
             harvest_price_per_kg=_decimal(row.harvest_price_per_kg, "0.01"),
             partial_harvest_kg=_decimal(row.partial_harvest_kg),
             stop_reason=row.stop_reason,
-            feedings=_feedings_for_row(row, feed_by_name),
+            feedings=_feedings_for_row(row, feed_by_name, feeding_split),
         )
         for row in result.daily_results
     ]
@@ -417,9 +425,10 @@ async def preview_prediction(
     optimize: bool,
 ) -> PredictionResultOut:
     config = await build_config(db, cycle, start_date, target_doc)
+    feed_time = await _pond_feed_time(db, cycle)
     runner = core.optimize_partial_harvests if optimize else core.simulate
     result = await asyncio.to_thread(runner, config)
-    return result_to_out(cycle.start_date, result, config.feed_plan)
+    return result_to_out(cycle.start_date, result, config.feed_plan, feed_time=feed_time)
 
 
 async def generate_prediction(
