@@ -46,8 +46,17 @@ def admin_emails() -> set[str]:
     }
 
 
+def is_admin_email(email: str) -> bool:
+    return normalize_email(email) in admin_emails()
+
+
 def is_admin(user: CurrentUser) -> bool:
-    return bool(user.email and normalize_email(user.email) in admin_emails())
+    return bool(user.email and is_admin_email(user.email))
+
+
+def require_admin(user: CurrentUser) -> None:
+    if not is_admin(user):
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
 
 
 def validate_role(role: str) -> str:

@@ -2,7 +2,7 @@
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -37,12 +37,21 @@ def _estimated_harvest_count(biomass_kg: Decimal, sampled_abw_g: Decimal) -> int
     return int(((biomass_kg * Decimal("1000")) / sampled_abw_g).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
 
 
+_ATTRIBUTION_FIELDS = {"updated_by", "updated_by_type"}
+
+
 def _feeding_payload(payload: FeedingCreate | FeedingUpdate, exclude_unset: bool = False) -> dict:
-    data = payload.model_dump(exclude_unset=exclude_unset)
-    json_data = payload.model_dump(mode="json", exclude_unset=exclude_unset)
+    data = payload.model_dump(exclude_unset=exclude_unset, exclude=_ATTRIBUTION_FIELDS)
+    json_data = payload.model_dump(mode="json", exclude_unset=exclude_unset, exclude=_ATTRIBUTION_FIELDS)
     if "feed_types" in data:
         data["feed_types"] = json_data["feed_types"]
     return data
+
+
+def _resolve_updated_by(payload: FeedingCreate | FeedingUpdate, user: CurrentUser) -> tuple[str, str]:
+    updated_by_type = payload.updated_by_type or "human"
+    updated_by = payload.updated_by or user.email or user.id
+    return updated_by, updated_by_type
 
 
 @router.post(
@@ -58,7 +67,13 @@ async def create_feeding(
 ) -> FeedingSession:
     await require_daily_log_permission(db, user, daily_log_id, "add")
     await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
-    feeding = FeedingSession(daily_log_id=daily_log_id, **_feeding_payload(payload))
+    updated_by, updated_by_type = _resolve_updated_by(payload, user)
+    feeding = FeedingSession(
+        daily_log_id=daily_log_id,
+        updated_by=updated_by,
+        updated_by_type=updated_by_type,
+        **_feeding_payload(payload),
+    )
     db.add(feeding)
     await db.commit()
     await db.refresh(feeding)
@@ -74,8 +89,18 @@ async def update_feeding(
 ) -> FeedingSession:
     await require_feeding_permission(db, user, feeding_id, "manage")
     feeding = await get_or_404(db, FeedingSession, feeding_id, "Feeding not found")
+
+    updated_by, updated_by_type = _resolve_updated_by(payload, user)
+    if updated_by_type == "ai" and feeding.updated_by_type == "human":
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "This feeding was last updated by a human and cannot be overwritten by an AI update.",
+        )
+
     for k, v in _feeding_payload(payload, exclude_unset=True).items():
         setattr(feeding, k, v)
+    feeding.updated_by = updated_by
+    feeding.updated_by_type = updated_by_type
     await db.commit()
     await db.refresh(feeding)
     return feeding

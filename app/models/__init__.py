@@ -13,11 +13,13 @@ from app.models.entities import (
     Pond,
     PopulationSample,
     Treatment,
+    User,
     WaterParameters,
 )
 
 __all__ = [
     "Grid",
+    "User",
     "BlindFeedingTemplate",
     "Pond",
     "Cycle",

@@ -46,3 +46,5 @@ class RegisteredUserOut(BaseModel):
     created_at: datetime
     last_sign_in_at: datetime | None = None
     is_admin: bool = False
+    is_active: bool = True
+    must_change_password: bool = False

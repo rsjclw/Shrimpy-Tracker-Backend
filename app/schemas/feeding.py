@@ -1,6 +1,8 @@
 import uuid
+from datetime import datetime
 from datetime import time as dtime
 from decimal import Decimal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -36,6 +38,8 @@ class FeedingCreate(BaseModel):
     additives: list[FeedingAdditive] = Field(default_factory=list)
     feed_types: list[FeedingFeedType] = Field(default_factory=list)
     notes: str | None = None
+    updated_by: str | None = None
+    updated_by_type: Literal["human", "ai"] | None = None
 
     @field_validator("amount_kg")
     @classmethod
@@ -55,6 +59,8 @@ class FeedingUpdate(BaseModel):
     additives: list[FeedingAdditive] | None = None
     feed_types: list[FeedingFeedType] | None = None
     notes: str | None = None
+    updated_by: str | None = None
+    updated_by_type: Literal["human", "ai"] | None = None
 
     @field_validator("amount_kg")
     @classmethod
@@ -78,3 +84,6 @@ class FeedingOut(BaseModel):
     additives: list[FeedingAdditive]
     feed_types: list[FeedingFeedType]
     notes: str | None
+    updated_at: datetime
+    updated_by: str | None
+    updated_by_type: str | None

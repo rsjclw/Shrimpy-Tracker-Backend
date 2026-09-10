@@ -1,4 +1,15 @@
 from app.schemas.additive import AdditiveCreate, AdditiveOut, AdditiveUpdate
+from app.schemas.auth import (
+    ChangePasswordRequest,
+    LoginOut,
+    LoginRequest,
+    ResetPasswordOut,
+    ResetPasswordRequest,
+    UserActiveUpdate,
+    UserCreate,
+    UserCreatedOut,
+    UserOut,
+)
 from app.schemas.blind_feeding import (
     BlindFeedingTemplateCreate,
     BlindFeedingTemplateOut,
@@ -45,6 +56,15 @@ from app.schemas.treatment import TreatmentCreate, TreatmentOut, TreatmentUpdate
 from app.schemas.water import WaterParametersUpsert, WaterParametersOut
 
 __all__ = [
+    "ChangePasswordRequest",
+    "LoginOut",
+    "LoginRequest",
+    "ResetPasswordOut",
+    "ResetPasswordRequest",
+    "UserActiveUpdate",
+    "UserCreate",
+    "UserCreatedOut",
+    "UserOut",
     "GridCreate",
     "BlindFeedingTemplateCreate",
     "BlindFeedingTemplateUpdate",

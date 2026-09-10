@@ -1,14 +1,12 @@
 from uuid import UUID
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
-from app.config import settings
 from app.database import get_db
-from app.models import Farm, FarmMembership
+from app.models import Farm, FarmMembership, User
 from app.schemas import (
     FarmCreate,
     FarmDeleteOut,
@@ -19,21 +17,17 @@ from app.schemas import (
     RegisteredUserOut,
 )
 from app.services.access import (
-    admin_emails,
     get_farm_access,
     is_admin,
+    is_admin_email,
     list_memberships,
     normalize_email,
+    require_admin,
     validate_role,
 )
+from app.services.users import registered_user_out
 
 router = APIRouter(prefix="/farms", tags=["farms"])
-SUPABASE_USERS_PAGE_SIZE = 1000
-
-
-def _require_admin(user: CurrentUser) -> None:
-    if not is_admin(user):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admin access required")
 
 
 def _empty_name_error() -> HTTPException:
@@ -48,10 +42,6 @@ def _farm_out(farm: Farm, role: str) -> FarmOut:
     return FarmOut(id=farm.id, name=farm.name, created_at=farm.created_at, role=role)
 
 
-def _is_admin_email(email: str) -> bool:
-    return normalize_email(email) in admin_emails()
-
-
 def _farm_member_out(membership: FarmMembership) -> FarmMemberOut:
     return FarmMemberOut(
         farm_id=membership.farm_id,
@@ -62,80 +52,11 @@ def _farm_member_out(membership: FarmMembership) -> FarmMemberOut:
     )
 
 
-def _registered_user_out(user: dict) -> RegisteredUserOut | None:
-    email = user.get("email")
-    if not email:
-        return None
-    return RegisteredUserOut(
-        id=user["id"],
-        email=normalize_email(email),
-        created_at=user["created_at"],
-        last_sign_in_at=user.get("last_sign_in_at"),
-        is_admin=_is_admin_email(email),
-    )
-
-
-def _sort_registered_users(users: list[RegisteredUserOut]) -> list[RegisteredUserOut]:
-    return sorted(users, key=lambda user: user.created_at, reverse=True)
-
-
 def _clean_farm_name(name: str) -> str:
     cleaned = name.strip()
     if not cleaned:
         raise _empty_name_error()
     return cleaned
-
-
-async def _fetch_registered_users() -> list[RegisteredUserOut]:
-    service_role_key = settings.supabase_service_role_key.strip()
-    if not service_role_key or service_role_key == "your_supabase_service_role_key":
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "SUPABASE_SERVICE_ROLE_KEY is required to list registered users",
-        )
-
-    headers = {
-        "apikey": service_role_key,
-        "Authorization": f"Bearer {service_role_key}",
-    }
-    users: list[RegisteredUserOut] = []
-    page = 1
-    async with httpx.AsyncClient(timeout=20) as client:
-        while True:
-            try:
-                response = await client.get(
-                    f"{settings.supabase_url}/auth/v1/admin/users",
-                    headers=headers,
-                    params={"page": page, "per_page": SUPABASE_USERS_PAGE_SIZE},
-                )
-            except httpx.HTTPError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    f"Could not reach Supabase Auth: {exc}",
-                ) from exc
-            if response.status_code in {401, 403}:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "Supabase service role key cannot list users",
-                )
-            try:
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                raise HTTPException(
-                    status.HTTP_503_SERVICE_UNAVAILABLE,
-                    "Supabase Auth could not list users",
-                ) from exc
-            batch = response.json().get("users", [])
-            users.extend(
-                user_out
-                for user in batch
-                if (user_out := _registered_user_out(user)) is not None
-            )
-            if len(batch) < SUPABASE_USERS_PAGE_SIZE:
-                break
-            page += 1
-
-    return _sort_registered_users(users)
 
 
 @router.get("", response_model=list[FarmOut])
@@ -166,7 +87,7 @@ async def create_farm(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FarmOut:
-    _require_admin(user)
+    require_admin(user)
     farm = Farm(name=_clean_farm_name(payload.name))
     db.add(farm)
     await db.commit()
@@ -176,10 +97,12 @@ async def create_farm(
 
 @router.get("/registered-users", response_model=list[RegisteredUserOut])
 async def list_registered_users(
+    db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> list[RegisteredUserOut]:
-    _require_admin(user)
-    return await _fetch_registered_users()
+    require_admin(user)
+    result = await db.execute(select(User).order_by(User.created_at.desc(), User.email))
+    return [registered_user_out(row) for row in result.scalars().all()]
 
 
 @router.get("/{farm_id}", response_model=FarmOut)
@@ -204,7 +127,7 @@ async def update_farm(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FarmOut:
-    _require_admin(user)
+    require_admin(user)
     farm = await db.get(Farm, farm_id)
     if not farm:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Farm not found")
@@ -220,7 +143,7 @@ async def delete_farm(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FarmDeleteOut:
-    _require_admin(user)
+    require_admin(user)
     farm = await db.get(Farm, farm_id)
     if not farm:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Farm not found")
@@ -236,7 +159,7 @@ async def list_farm_members(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> list[FarmMemberOut]:
-    _require_admin(user)
+    require_admin(user)
     farm = await db.get(Farm, farm_id)
     if not farm:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Farm not found")
@@ -248,7 +171,7 @@ async def list_farm_members(
     return [
         _farm_member_out(membership)
         for membership in result.scalars().all()
-        if not _is_admin_email(membership.email)
+        if not is_admin_email(membership.email)
     ]
 
 
@@ -259,13 +182,13 @@ async def upsert_farm_member(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FarmMemberOut:
-    _require_admin(user)
+    require_admin(user)
     farm = await db.get(Farm, farm_id)
     if not farm:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Farm not found")
 
     email = normalize_email(payload.email)
-    if _is_admin_email(email):
+    if is_admin_email(email):
         raise _admin_member_error()
     role = validate_role(payload.role)
     result = await db.execute(
@@ -293,7 +216,7 @@ async def delete_farm_member(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> None:
-    _require_admin(user)
+    require_admin(user)
     result = await db.execute(
         select(FarmMembership).where(
             FarmMembership.farm_id == farm_id,

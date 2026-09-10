@@ -50,6 +50,18 @@ class Grid(Base):
     )
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class Farm(Base):
     __tablename__ = "farms"
 
@@ -173,6 +185,14 @@ class FeedingSession(Base):
     additives: Mapped[list[dict]] = mapped_column(JSON, default=list)
     feed_types: Mapped[list[dict]] = mapped_column(JSONB, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    # Free-text label of who last wrote this row ("Ayu", "Worker 2", "Claude", ...),
+    # paired with updated_by_type so the AI auto-fill can tell it must not
+    # overwrite a human's entry - see routers/days.py::update_feeding.
+    updated_by: Mapped[str | None] = mapped_column(String(100))
+    updated_by_type: Mapped[str | None] = mapped_column(String(20))
 
     daily_log: Mapped[DailyLog] = relationship(back_populates="feedings")
 

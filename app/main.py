@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import additives, blind_feeding, cycles, days, farms, feed_types, grids, ponds
+from app.routers import additives, auth, blind_feeding, cycles, days, farms, feed_types, grids, ponds
 from app.services import weather_sync
 
 logger = logging.getLogger(__name__)
@@ -43,6 +43,7 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+app.include_router(auth.router)
 app.include_router(grids.router)
 app.include_router(farms.router)
 app.include_router(ponds.router)

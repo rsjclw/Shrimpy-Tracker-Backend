@@ -3,8 +3,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     database_url: str
-    supabase_url: str
-    supabase_service_role_key: str = ""
+    jwt_secret_key: str
+    jwt_expires_hours: int = 168
     frontend_origin: str = "http://localhost:3000"
     admin_emails: str = ""
     # Used for lunar windows when a grid has no coordinates yet, and as the
