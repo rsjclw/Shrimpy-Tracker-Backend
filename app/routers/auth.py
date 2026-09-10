@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
@@ -20,7 +20,8 @@ from app.schemas import (
     UserOut,
 )
 from app.security import create_access_token, generate_temp_password, hash_password, verify_password
-from app.services.access import require_admin
+from app.services.access import normalize_email, require_admin
+from app.services.login_throttle import login_throttle
 from app.services.users import (
     get_user_by_email,
     get_user_or_404,
@@ -53,12 +54,28 @@ async def _current_db_user(db: AsyncSession, current: CurrentUser) -> User:
 
 
 @router.post("/login", response_model=LoginOut)
-async def login(payload: LoginRequest, db: AsyncSession = Depends(get_db)) -> LoginOut:
-    user = await get_user_by_email(db, payload.email)
+async def login(
+    payload: LoginRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> LoginOut:
+    email = normalize_email(payload.email)
+    ip = request.client.host if request.client else "unknown"
+    retry_after = login_throttle.retry_after(email, ip)
+    if retry_after:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many failed sign-in attempts. Try again later.",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    user = await get_user_by_email(db, email)
     password_hash = user.password_hash if user else _DUMMY_PASSWORD_HASH
     if not verify_password(payload.password, password_hash) or not user or not user.is_active:
+        login_throttle.record_failure(email, ip)
         raise _invalid_credentials()
 
+    login_throttle.clear(email)
     user.last_login_at = datetime.now(timezone.utc)
     await db.commit()
     return LoginOut(access_token=create_access_token(user.id, user.email), user=user_out(user))
