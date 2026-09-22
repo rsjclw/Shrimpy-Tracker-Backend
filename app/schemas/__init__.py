@@ -1,4 +1,4 @@
-from app.schemas.additive import AdditiveCreate, AdditiveOut, AdditiveUpdate
+from app.schemas.additive import AdditiveCreate, AdditiveDoseOut, AdditiveOut, AdditiveUpdate, AdditiveUsageOut
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginOut,
@@ -89,7 +89,9 @@ __all__ = [
     "FeedTypeOut",
     "AdditiveCreate",
     "AdditiveUpdate",
+    "AdditiveDoseOut",
     "AdditiveOut",
+    "AdditiveUsageOut",
     "DailyLogUpdate",
     "DayView",
     "DaySummary",

@@ -28,6 +28,7 @@ from app.services.access import (
     require_harvest_permission,
     require_treatment_permission,
 )
+from app.services.additives import resolve_additives
 from app.services.common import apply_updates, get_or_404
 
 router = APIRouter(tags=["days"])
@@ -65,14 +66,23 @@ async def create_feeding(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FeedingSession:
-    await require_daily_log_permission(db, user, daily_log_id, "add")
-    await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
+    access = await require_daily_log_permission(db, user, daily_log_id, "add")
+    log = await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
     updated_by, updated_by_type = _resolve_updated_by(payload, user)
+    data = _feeding_payload(payload)
+    data["additives"] = await resolve_additives(
+        db,
+        farm_id=access.farm_id,
+        cycle_id=log.cycle_id,
+        entries=payload.additives,
+        log_date=log.date,
+        feed_time=payload.feed_time,
+    )
     feeding = FeedingSession(
         daily_log_id=daily_log_id,
         updated_by=updated_by,
         updated_by_type=updated_by_type,
-        **_feeding_payload(payload),
+        **data,
     )
     db.add(feeding)
     await db.commit()
@@ -87,7 +97,7 @@ async def update_feeding(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> FeedingSession:
-    await require_feeding_permission(db, user, feeding_id, "manage")
+    access = await require_feeding_permission(db, user, feeding_id, "manage")
     feeding = await get_or_404(db, FeedingSession, feeding_id, "Feeding not found")
 
     updated_by, updated_by_type = _resolve_updated_by(payload, user)
@@ -97,7 +107,19 @@ async def update_feeding(
             "This feeding was last updated by a human and cannot be overwritten by an AI update.",
         )
 
-    for k, v in _feeding_payload(payload, exclude_unset=True).items():
+    data = _feeding_payload(payload, exclude_unset=True)
+    if payload.additives is not None:
+        log = await get_or_404(db, DailyLog, feeding.daily_log_id, "Daily log not found")
+        data["additives"] = await resolve_additives(
+            db,
+            farm_id=access.farm_id,
+            cycle_id=log.cycle_id,
+            entries=payload.additives,
+            log_date=log.date,
+            feed_time=payload.feed_time or feeding.feed_time,
+            feeding_id=feeding.id,
+        )
+    for k, v in data.items():
         setattr(feeding, k, v)
     feeding.updated_by = updated_by
     feeding.updated_by_type = updated_by_type
