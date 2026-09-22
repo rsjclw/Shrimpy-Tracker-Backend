@@ -210,17 +210,31 @@ async def get_prediction_baseline(db: AsyncSession, cycle: Cycle, target: ddate)
     }
 
 
-async def _default_feed_types(db: AsyncSession, cycle: Cycle, target: ddate) -> list[FeedingFeedType]:
+async def _feed_type_history(
+    db: AsyncSession, cycle: Cycle, up_to: ddate
+) -> list[tuple[ddate, list]]:
+    """Non-empty feed-type mixes of the cycle's feedings up to a date, newest first."""
     result = await db.execute(
-        select(FeedingSession.feed_types)
+        select(DailyLog.date, FeedingSession.feed_types)
         .join(DailyLog, FeedingSession.daily_log_id == DailyLog.id)
-        .where(DailyLog.cycle_id == cycle.id, DailyLog.date <= target)
+        .where(DailyLog.cycle_id == cycle.id, DailyLog.date <= up_to)
         .order_by(DailyLog.date.desc(), FeedingSession.feed_time.desc())
     )
-    for feed_types in result.scalars().all():
-        if feed_types:
-            return [FeedingFeedType.model_validate(f) for f in feed_types]
+    return [(day, feed_types) for day, feed_types in result.all() if feed_types]
 
+
+def _latest_feed_types(
+    history: list[tuple[ddate, list]], target: ddate
+) -> list[FeedingFeedType] | None:
+    """The mix of the last feeding on or before target, or None when there is none."""
+    for day, feed_types in history:
+        if day <= target:
+            return [FeedingFeedType.model_validate(f) for f in feed_types]
+    return None
+
+
+async def _farm_default_feed_types(db: AsyncSession, cycle: Cycle) -> list[FeedingFeedType]:
+    """The farm's first feed type at 100%, for a cycle with no feedings yet."""
     farm_result = await db.execute(
         select(Grid.farm_id)
         .join(Pond, Pond.grid_id == Grid.id)
@@ -250,44 +264,36 @@ async def _default_feed_types(db: AsyncSession, cycle: Cycle, target: ddate) -> 
     ]
 
 
-async def _environment_for(
-    db: AsyncSession, grid: Grid | None, target: ddate
-) -> DayEnvironmentOut | None:
-    """Cached weather for the date, or None when it was never fetched."""
+async def _environments_for(
+    db: AsyncSession, grid: Grid | None, date_from: ddate, date_to: ddate
+) -> dict[ddate, DayEnvironmentOut]:
+    """Cached weather per date in the span; dates never fetched are absent."""
     if grid is None:
-        return None
+        return {}
     result = await db.execute(
         select(DailyEnvironment).where(
-            DailyEnvironment.grid_id == grid.id, DailyEnvironment.date == target
+            DailyEnvironment.grid_id == grid.id,
+            DailyEnvironment.date >= date_from,
+            DailyEnvironment.date <= date_to,
         )
     )
-    row = result.scalar_one_or_none()
-    return DayEnvironmentOut.model_validate(row) if row else None
+    return {row.date: DayEnvironmentOut.model_validate(row) for row in result.scalars().all()}
 
 
-async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView:
-    """Returns the full day view (or empty shell if no daily_log yet)."""
-    result = await db.execute(
-        select(DailyLog)
-        .where(DailyLog.cycle_id == cycle.id, DailyLog.date == target)
-        .options(
-            selectinload(DailyLog.feedings),
-            selectinload(DailyLog.harvests),
-            selectinload(DailyLog.water),
-            selectinload(DailyLog.treatments),
-        )
-    )
-    log = result.scalar_one_or_none()
+# Longest span one day-views request may cover; the dashboard asks for about two weeks.
+MAX_DAY_VIEW_SPAN = 62
 
-    feedings_all, samples, abw_history, harvests_all = await _gather(db, cycle)
-    metrics = _compute_metrics(cycle, target, feedings_all, samples, abw_history, harvests_all)
-    sampling = _compute_sampling_metrics(target, feedings_all, samples, abw_history, harvests_all, cycle)
-    default_feed_types = await _default_feed_types(db, cycle, target)
-    grid = await grid_for_cycle(db, cycle.id)
-    tz = (grid.timezone if grid else None) or settings.default_timezone
-    lunar = LunarDayOut(**vars(lunar_day(target, tz)))
-    environment = await _environment_for(db, grid, target)
 
+def _build_day_view(
+    cycle: Cycle,
+    target: ddate,
+    log: DailyLog | None,
+    metrics: DayMetrics,
+    sampling: SamplingMetrics,
+    default_feed_types: list[FeedingFeedType],
+    lunar: LunarDayOut,
+    environment: DayEnvironmentOut | None,
+) -> DayView:
     if not log:
         return DayView(
             daily_log_id=None,  # type: ignore[arg-type]
@@ -332,6 +338,62 @@ async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView
     )
 
 
+async def get_day_view(db: AsyncSession, cycle: Cycle, target: ddate) -> DayView:
+    """Returns the full day view (or empty shell if no daily_log yet)."""
+    return (await get_day_views(db, cycle, target, target))[0]
+
+
+async def get_day_views(
+    db: AsyncSession, cycle: Cycle, date_from: ddate, date_to: ddate
+) -> list[DayView]:
+    """Full day views for every date in [date_from, date_to], oldest first.
+
+    The cycle-wide rows behind the metrics, the grid and the feed-type history
+    are loaded once for the whole span instead of once per day.
+    """
+    logs_result = await db.execute(
+        select(DailyLog)
+        .where(DailyLog.cycle_id == cycle.id, DailyLog.date >= date_from, DailyLog.date <= date_to)
+        .options(
+            selectinload(DailyLog.feedings),
+            selectinload(DailyLog.harvests),
+            selectinload(DailyLog.water),
+            selectinload(DailyLog.treatments),
+        )
+    )
+    logs = {log.date: log for log in logs_result.scalars().all()}
+
+    feedings_all, samples, abw_history, harvests_all = await _gather(db, cycle)
+    feed_type_history = await _feed_type_history(db, cycle, date_to)
+    fallback_feed_types: list[FeedingFeedType] | None = None
+    grid = await grid_for_cycle(db, cycle.id)
+    tz = (grid.timezone if grid else None) or settings.default_timezone
+    environments = await _environments_for(db, grid, date_from, date_to)
+
+    views: list[DayView] = []
+    current = date_from
+    while current <= date_to:
+        default_feed_types = _latest_feed_types(feed_type_history, current)
+        if default_feed_types is None:
+            if fallback_feed_types is None:
+                fallback_feed_types = await _farm_default_feed_types(db, cycle)
+            default_feed_types = fallback_feed_types
+        views.append(
+            _build_day_view(
+                cycle,
+                current,
+                logs.get(current),
+                _compute_metrics(cycle, current, feedings_all, samples, abw_history, harvests_all),
+                _compute_sampling_metrics(current, feedings_all, samples, abw_history, harvests_all, cycle),
+                default_feed_types,
+                LunarDayOut(**vars(lunar_day(current, tz))),
+                environments.get(current),
+            )
+        )
+        current = current + timedelta(days=1)
+    return views
+
+
 async def list_day_summaries(
     db: AsyncSession, cycle: Cycle, date_from: ddate, date_to: ddate
 ) -> list[DaySummary]:
@@ -373,7 +435,7 @@ METRIC_EXTRACTORS = {
 
 # Cached grid weather, trendable alongside the pond's own parameters. Stored
 # per grid rather than per daily log, so these are resolved through the cycle's
-# grid instead of its daily logs - see _environment_for.
+# grid instead of its daily logs - see _environments_for.
 ENVIRONMENT_METRICS = (
     "temp_min_c",
     "temp_mean_c",

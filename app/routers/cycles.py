@@ -92,7 +92,9 @@ class PredictionBaselineOut(BaseModel):
 
 
 from app.services.day_view import (
+    MAX_DAY_VIEW_SPAN,
     get_day_view,
+    get_day_views,
     get_harvest_dates,
     get_prediction_baseline,
     get_sampling_dates,
@@ -300,6 +302,24 @@ async def list_cycle_days(
     await require_cycle_permission(db, user, cycle_id)
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     return await list_day_summaries(db, cycle, date_from, date_to)
+
+
+@router.get("/{cycle_id}/day-views", response_model=list[DayView])
+async def list_cycle_day_views(
+    cycle_id: UUID,
+    date_from: ddate = Query(..., alias="from"),
+    date_to: ddate = Query(..., alias="to"),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> list[DayView]:
+    """Full day views for a span, oldest first - one request instead of one per day."""
+    if date_to < date_from:
+        raise HTTPException(status_code=422, detail="'to' must not be before 'from'")
+    if (date_to - date_from).days + 1 > MAX_DAY_VIEW_SPAN:
+        raise HTTPException(status_code=422, detail=f"At most {MAX_DAY_VIEW_SPAN} days per request")
+    await require_cycle_permission(db, user, cycle_id)
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    return await get_day_views(db, cycle, date_from, date_to)
 
 
 @router.get("/{cycle_id}/days/{day}", response_model=DayView)

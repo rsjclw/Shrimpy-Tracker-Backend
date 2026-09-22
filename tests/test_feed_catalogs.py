@@ -6,7 +6,7 @@ from uuid import uuid4
 import pytest
 
 from app.schemas import AdditiveCreate, AdditiveOut, FeedTypeCreate, FeedTypeOut
-from app.services.day_view import _default_feed_types
+from app.services.day_view import _farm_default_feed_types, _latest_feed_types
 
 
 class _ScalarResult:
@@ -63,8 +63,7 @@ def test_catalog_schemas_include_persistent_ids():
     assert additive.id == 1
 
 
-@pytest.mark.asyncio
-async def test_default_feed_types_use_latest_previous_feeding_mix():
+def test_default_feed_types_use_latest_previous_feeding_mix():
     previous_mix = [
         {
             "feed_type_id": "feed-a",
@@ -75,14 +74,17 @@ async def test_default_feed_types_use_latest_previous_feeding_mix():
             "notes": None,
         }
     ]
-    db = _FakeDb(_ExecuteResult([previous_mix]))
+    later_mix = [{**previous_mix[0], "feed_type_id": "feed-b"}]
+    # Newest first, as _feed_type_history returns it.
+    history = [(datetime(2026, 5, 6).date(), later_mix), (datetime(2026, 5, 4).date(), previous_mix)]
 
-    result = await _default_feed_types(db, SimpleNamespace(id=uuid4()), datetime(2026, 5, 5).date())
+    result = _latest_feed_types(history, datetime(2026, 5, 5).date())
 
+    assert result is not None
     assert len(result) == 1
     assert result[0].feed_type_id == "feed-a"
     assert result[0].percentage == Decimal("100")
-    assert db.responses == []
+    assert _latest_feed_types(history, datetime(2026, 5, 3).date()) is None
 
 
 @pytest.mark.asyncio
@@ -91,7 +93,6 @@ async def test_default_feed_types_fall_back_to_first_farm_feed_type():
     farm_id = uuid4()
     pond_id = uuid4()
     db = _FakeDb(
-        _ExecuteResult([]),
         _ExecuteResult([farm_id]),
         _ExecuteResult(
             [
@@ -106,7 +107,7 @@ async def test_default_feed_types_fall_back_to_first_farm_feed_type():
         ),
     )
 
-    result = await _default_feed_types(db, SimpleNamespace(id=uuid4(), pond_id=pond_id), datetime(2026, 5, 5).date())
+    result = await _farm_default_feed_types(db, SimpleNamespace(id=uuid4(), pond_id=pond_id))
 
     assert len(result) == 1
     assert result[0].feed_type_id == str(feed_type_id)
@@ -116,8 +117,9 @@ async def test_default_feed_types_fall_back_to_first_farm_feed_type():
 
 @pytest.mark.asyncio
 async def test_default_feed_types_are_empty_without_history_or_catalog():
-    db = _FakeDb(_ExecuteResult([]), _ExecuteResult([uuid4()]), _ExecuteResult([]))
+    db = _FakeDb(_ExecuteResult([uuid4()]), _ExecuteResult([]))
 
-    result = await _default_feed_types(db, SimpleNamespace(id=uuid4(), pond_id=uuid4()), datetime(2026, 5, 5).date())
+    assert _latest_feed_types([], datetime(2026, 5, 5).date()) is None
+    result = await _farm_default_feed_types(db, SimpleNamespace(id=uuid4(), pond_id=uuid4()))
 
     assert result == []
