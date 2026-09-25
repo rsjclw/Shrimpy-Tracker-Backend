@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
-from app.models import Cycle, DailyEnvironment, DailyLog, FeedType, FeedingSession, Grid, Harvest, Pond, PopulationSample, WaterParameters
+from app.models import Cycle, DailyEnvironment, DailyLog, FeedingSession, Grid, Harvest, Pond, PopulationSample, Product, WaterParameters
 from app.schemas import (
     DayEnvironmentOut,
     DayMetrics,
@@ -234,7 +234,7 @@ def _latest_feed_types(
 
 
 async def _farm_default_feed_types(db: AsyncSession, cycle: Cycle) -> list[FeedingFeedType]:
-    """The farm's first feed type at 100%, for a cycle with no feedings yet."""
+    """The farm's first feed in the catalog at 100%, for a cycle with no feedings yet."""
     farm_result = await db.execute(
         select(Grid.farm_id)
         .join(Pond, Pond.grid_id == Grid.id)
@@ -243,21 +243,20 @@ async def _farm_default_feed_types(db: AsyncSession, cycle: Cycle) -> list[Feedi
     farm_id = farm_result.scalar_one_or_none()
     if not farm_id:
         return []
-    feed_type_result = await db.execute(
-        select(FeedType)
-        .where(FeedType.farm_id == farm_id)
-        .order_by(FeedType.created_at, FeedType.brand)
+    feed_result = await db.execute(
+        select(Product)
+        .where(Product.farm_id == farm_id, Product.category == "feed", Product.active.is_(True))
+        .order_by(Product.created_at, Product.name)
         .limit(1)
     )
-    first = feed_type_result.scalar_one_or_none()
+    first = feed_result.scalar_one_or_none()
     if not first:
         return []
     return [
         FeedingFeedType(
-            feed_type_id=str(first.id),
-            brand=first.brand,
-            type=first.type,
-            price_per_kg=first.price_per_kg,
+            product_id=str(first.id),
+            name=first.name,
+            price_per_unit=first.price_per_unit,
             percentage=Decimal("100"),
             notes=first.notes,
         )

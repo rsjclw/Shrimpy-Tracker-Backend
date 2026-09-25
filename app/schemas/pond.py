@@ -28,3 +28,5 @@ class PondOut(BaseModel):
     name: str
     area_m2: Decimal | None
     default_feed_time: time
+    # Set from the inventory page, per warehouse. Null: this pond moves no stock.
+    warehouse_id: uuid.UUID | None = None

@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
-from app.models import DailyLog, FeedingSession, Harvest, Treatment, WaterParameters
+from app.models import DailyLog, FeedingSession, Grid, Harvest, Treatment, Warehouse, WaterParameters
 from app.schemas import (
     FeedingCreate,
     FeedingOut,
@@ -17,6 +17,7 @@ from app.schemas import (
     HarvestOut,
     HarvestUpdate,
     TreatmentCreate,
+    TreatmentItemIn,
     TreatmentOut,
     TreatmentUpdate,
     WaterParametersOut,
@@ -30,6 +31,8 @@ from app.services.access import (
 )
 from app.services.additives import resolve_additives
 from app.services.common import apply_updates, get_or_404
+from app.services.inventory import MovementError, consume_products, reverse_source
+from app.services.products import ProductError, expand, load_catalog
 
 router = APIRouter(tags=["days"])
 
@@ -213,6 +216,63 @@ async def upsert_water(
     return water
 
 
+def _amount_text(value: Decimal) -> str:
+    # Stored as text so JSON keeps the exact decimal, as feeding additives do.
+    return format(value.normalize(), "f")
+
+
+def _summarise(items: list[dict]) -> str:
+    """The one-line `action` a products-only treatment gets, so old readers still work."""
+    return ", ".join(f"{item['name']} {item['amount']} {item['unit']}" for item in items)
+
+
+async def _resolve_treatment_items(
+    db: AsyncSession,
+    farm_id: UUID,
+    warehouse_id: UUID | None,
+    items: list[TreatmentItemIn],
+) -> tuple[list[dict], dict[UUID, Decimal]]:
+    """Stored item lines, plus what they expand to in stock: {product: base amount}."""
+    if not items:
+        return [], {}
+    if warehouse_id is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Say which warehouse the products came from")
+    # A warehouse on another farm would otherwise be a way to spend someone else's stock.
+    warehouse = await get_or_404(db, Warehouse, warehouse_id, "Warehouse not found")
+    grid = await get_or_404(db, Grid, warehouse.grid_id, "Grid not found")
+    if grid.farm_id != farm_id:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, "That warehouse belongs to another farm")
+
+    catalog = await load_catalog(db, farm_id)
+    stored: list[dict] = []
+    lines: list[tuple[UUID, Decimal]] = []
+    seen: set[UUID] = set()
+    try:
+        for item in items:
+            product = catalog.get(item.product_id)
+            if product.id in seen:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY, f"{product.name} is listed twice on this treatment"
+                )
+            seen.add(product.id)
+            base = catalog.to_base(product, item.amount, item.unit)
+            stored.append(
+                {
+                    "product_id": str(product.id),
+                    "name": product.name,
+                    "amount": _amount_text(item.amount),
+                    "unit": (item.unit or product.base_unit).strip(),
+                    "base_amount": _amount_text(base),
+                    "base_unit": product.base_unit,
+                }
+            )
+            lines.append((product.id, base))
+        totals = expand(catalog, lines)
+    except ProductError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    return stored, totals
+
+
 @router.post(
     "/days/{daily_log_id}/treatments",
     response_model=TreatmentOut,
@@ -224,10 +284,23 @@ async def create_treatment(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> Treatment:
-    await require_daily_log_permission(db, user, daily_log_id, "add")
+    """Log a treatment, and take what it used out of the warehouse in the same transaction."""
+    access = await require_daily_log_permission(db, user, daily_log_id, "add")
     await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
-    treatment = Treatment(daily_log_id=daily_log_id, **payload.model_dump())
+    stored, totals = await _resolve_treatment_items(db, access.farm_id, payload.warehouse_id, payload.items)
+    treatment = Treatment(
+        daily_log_id=daily_log_id,
+        treatment_time=payload.treatment_time,
+        action=(payload.action or "").strip() or _summarise(stored),
+        worker=payload.worker,
+        notes=payload.notes,
+        warehouse_id=payload.warehouse_id,
+        items=stored,
+    )
     db.add(treatment)
+    # The movements point at the treatment, so it needs its id before they are written.
+    await db.flush()
+    await _move_stock(db, user, treatment, totals, reverse_first=False)
     await db.commit()
     await db.refresh(treatment)
     return treatment
@@ -240,9 +313,27 @@ async def update_treatment(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> Treatment:
-    await require_treatment_permission(db, user, treatment_id, "manage")
+    """Editing the products puts the old stock back and takes the new amounts out."""
+    access = await require_treatment_permission(db, user, treatment_id, "manage")
     treatment = await get_or_404(db, Treatment, treatment_id, "Treatment not found")
-    apply_updates(treatment, payload)
+    fields = payload.model_dump(exclude_unset=True, exclude={"items", "warehouse_id"})
+    for key, value in fields.items():
+        setattr(treatment, key, value)
+
+    if payload.items is not None:
+        warehouse_id = payload.warehouse_id or treatment.warehouse_id
+        stored, totals = await _resolve_treatment_items(db, access.farm_id, warehouse_id, payload.items)
+        treatment.items = stored
+        treatment.warehouse_id = warehouse_id if stored else None
+        if stored and not (payload.action or "").strip():
+            treatment.action = _summarise(stored)
+        await _move_stock(db, user, treatment, totals, reverse_first=True)
+    elif payload.warehouse_id is not None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "Send the products too when changing the warehouse, so the stock moves with them",
+        )
+
     await db.commit()
     await db.refresh(treatment)
     return treatment
@@ -256,5 +347,50 @@ async def delete_treatment(
 ) -> None:
     await require_treatment_permission(db, user, treatment_id, "manage")
     treatment = await get_or_404(db, Treatment, treatment_id, "Treatment not found")
+    # The reversing movements stay behind on purpose: the ledger is append-only,
+    # so the history still shows the stock went out and came back.
+    await _reverse(db, user, treatment.id)
     await db.delete(treatment)
     await db.commit()
+
+
+async def _move_stock(
+    db: AsyncSession,
+    user: CurrentUser,
+    treatment: Treatment,
+    totals: dict[UUID, Decimal],
+    *,
+    reverse_first: bool,
+) -> None:
+    """Apply a treatment's stock effect. Never commits, so a failure rolls the lot back."""
+    if reverse_first:
+        await _reverse(db, user, treatment.id)
+    if not totals:
+        return
+    try:
+        await consume_products(
+            db,
+            treatment.warehouse_id,
+            totals,
+            source_type="treatment",
+            source_id=treatment.id,
+            note=f"Treatment {treatment.treatment_time:%H:%M}",
+            created_by=user.email or user.id,
+        )
+    except MovementError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+
+async def _reverse(db: AsyncSession, user: CurrentUser, treatment_id: UUID) -> None:
+    try:
+        await reverse_source(
+            db,
+            "treatment",
+            treatment_id,
+            note="Treatment changed",
+            created_by=user.email or user.id,
+        )
+    except MovementError as exc:
+        await db.rollback()
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc

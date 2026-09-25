@@ -4,7 +4,7 @@ from datetime import time as dtime
 from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.services.feeding_amounts import round_feed_amount_kg
 
@@ -12,41 +12,76 @@ from app.services.feeding_amounts import round_feed_amount_kg
 class FeedingAdditive(BaseModel):
     """An additive on a feeding, as sent by a client.
 
-    Identify it by `additive_id` (the farm catalog id) or by `name` (matched to
-    the farm's catalog, ignoring case). `dosage_gr_per_kg` is optional: when it
-    is left out the server uses the last dose given for that additive in this
-    cycle, then the catalog's default dose.
+    Identify it by `product_id` (a catalog entry) or by `name`, matched to the
+    farm's catalog ignoring case.
+
+    `dose_per_kg` is per kg of feed, in whatever that entry is dosed in - grams
+    for a mass, millilitres for a volume. Left out, the server uses the last dose
+    given for it in this cycle; there is no stored default.
     """
 
-    additive_id: int | None = None
+    product_id: uuid.UUID | None = None
     name: str | None = None
-    dosage_gr_per_kg: Decimal | None = Field(default=None, ge=0)
+    dose_per_kg: Decimal | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
     def needs_identity(self) -> "FeedingAdditive":
-        if self.additive_id is None and not (self.name or "").strip():
-            raise ValueError("Each additive needs an additive_id or a name")
+        if self.product_id is None and not (self.name or "").strip():
+            raise ValueError("Each additive needs a product_id or a name")
         return self
 
 
 class FeedingAdditiveOut(BaseModel):
-    """An additive as stored on a feeding. `additive_id` is null only for legacy
-    entries whose name matched nothing in the farm catalog."""
+    """An additive as stored on a feeding.
 
-    additive_id: int | None = None
+    `product_id` is null only for entries written before the catalogs merged,
+    whose name matched nothing in the catalog.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    product_id: uuid.UUID | None = None
     name: str
-    dosage_gr_per_kg: Decimal
+    # Older feedings stored this under other names; all three read the same value.
+    dose_per_kg: Decimal = Field(
+        validation_alias=AliasChoices("dose_per_kg", "dose_gr_per_kg", "dosage_gr_per_kg")
+    )
+    # What the dose was in when logged. Entries from before the unit followed the
+    # product were all grams, so that is the fallback.
+    dose_unit: str = "g"
     # dose x the feeding's amount, filled in by FeedingOut.
     amount_g: Decimal | None = None
 
 
 class FeedingFeedType(BaseModel):
-    feed_type_id: str
-    brand: str
-    type: str
-    price_per_kg: Decimal
+    """One feed on a feeding, and its share of the amount.
+
+    `product_id`/`name`/`price_per_unit` are the current shape. Feedings written
+    before the catalogs merged carry `feed_type_id`, `brand`, `type` and
+    `price_per_kg` instead, so those are accepted and folded in rather than
+    migrated - they are snapshots, not live references.
+    """
+
+    # A string, as `feed_type_id` was: this is JSONB, and the prediction engine
+    # builds rows with synthetic ids that are not UUIDs.
+    product_id: str | None = None
+    name: str = ""
+    price_per_unit: Decimal | None = None
     percentage: Decimal
     notes: str | None = None
+    # Pre-merge shape, read-only.
+    feed_type_id: str | None = None
+    brand: str | None = None
+    type: str | None = None
+    price_per_kg: Decimal | None = None
+
+    @model_validator(mode="after")
+    def fold_in_legacy(self) -> "FeedingFeedType":
+        if not self.name:
+            self.name = " ".join(part for part in (self.brand, self.type) if part).strip()
+        if self.price_per_unit is None:
+            self.price_per_unit = self.price_per_kg
+        return self
 
 
 def _validate_feed_type_percentages(feed_types: list[FeedingFeedType] | None) -> None:
@@ -117,5 +152,5 @@ class FeedingOut(BaseModel):
     @model_validator(mode="after")
     def fill_additive_grams(self) -> "FeedingOut":
         for additive in self.additives:
-            additive.amount_g = (additive.dosage_gr_per_kg * self.amount_kg).quantize(Decimal("0.1"))
+            additive.amount_g = (additive.dose_per_kg * self.amount_kg).quantize(Decimal("0.1"))
         return self

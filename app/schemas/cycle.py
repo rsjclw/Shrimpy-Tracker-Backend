@@ -2,7 +2,7 @@ from datetime import date
 from decimal import Decimal
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class PredictionCycleSettings(BaseModel):
@@ -48,9 +48,18 @@ class PredictionCostsSettings(BaseModel):
 
 
 class PredictionFeedPlanRow(BaseModel):
-    feed_type_id: uuid.UUID
+    """`feed_type_id` is accepted for configs saved before the catalogs merged."""
+
+    product_id: uuid.UUID | None = None
+    feed_type_id: uuid.UUID | None = None
     maximum_daily_feed_kg: Decimal = Field(gt=0)
     use_until_abw_g: Decimal = Field(gt=0)
+
+    @model_validator(mode="after")
+    def needs_a_feed(self) -> "PredictionFeedPlanRow":
+        if self.product_id is None and self.feed_type_id is None:
+            raise ValueError("Each feed plan row needs a product_id")
+        return self
 
 
 class PredictionConfig(BaseModel):

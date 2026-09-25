@@ -1,4 +1,4 @@
-from app.schemas.additive import AdditiveCreate, AdditiveDoseOut, AdditiveOut, AdditiveUpdate, AdditiveUsageOut
+from app.schemas.additive_usage import AdditiveDoseOut, AdditiveUsageOut
 from app.schemas.auth import (
     ChangePasswordRequest,
     LoginOut,
@@ -32,7 +32,6 @@ from app.schemas.environment import (
     GridEnvironmentOut,
 )
 from app.schemas.feeding import FeedingCreate, FeedingFeedType, FeedingOut, FeedingUpdate
-from app.schemas.feed_type import FeedTypeCreate, FeedTypeOut, FeedTypeUpdate
 from app.schemas.farm import (
     FarmCreate,
     FarmDeleteOut,
@@ -52,8 +51,38 @@ from app.schemas.prediction import (
     PredictionResultOut,
 )
 from app.schemas.sample import PopulationSampleCreate, PopulationSampleOut
-from app.schemas.treatment import TreatmentCreate, TreatmentOut, TreatmentUpdate
+from app.schemas.product import (
+    ExpansionLine,
+    ExpansionOut,
+    ProductComponentIn,
+    ProductComponentOut,
+    ProductCreate,
+    ProductOut,
+    ProductUnitIn,
+    ProductUnitOut,
+    ProductUpdate,
+)
+from app.schemas.treatment import (
+    TreatmentCreate,
+    TreatmentItemIn,
+    TreatmentItemOut,
+    TreatmentOut,
+    TreatmentUpdate,
+)
 from app.schemas.water import WaterParametersUpsert, WaterParametersOut
+
+from app.schemas.inventory import (
+    InventoryItemCreate,
+    InventoryItemOut,
+    InventoryItemUpdate,
+    MovementCreate,
+    MovementOut,
+    WarehouseCreate,
+    WarehousePonds,
+    WarehouseInventoryOut,
+    WarehouseOut,
+    WarehouseUpdate,
+)
 
 __all__ = [
     "ChangePasswordRequest",
@@ -84,13 +113,7 @@ __all__ = [
     "CycleCreate",
     "CycleOut",
     "PredictionConfig",
-    "FeedTypeCreate",
-    "FeedTypeUpdate",
-    "FeedTypeOut",
-    "AdditiveCreate",
-    "AdditiveUpdate",
     "AdditiveDoseOut",
-    "AdditiveOut",
     "AdditiveUsageOut",
     "DailyLogUpdate",
     "DayView",
@@ -115,10 +138,31 @@ __all__ = [
     "TreatmentCreate",
     "TreatmentUpdate",
     "TreatmentOut",
+    "TreatmentItemIn",
+    "TreatmentItemOut",
+    "ProductCreate",
+    "ProductUpdate",
+    "ProductOut",
+    "ProductUnitIn",
+    "ProductUnitOut",
+    "ProductComponentIn",
+    "ProductComponentOut",
+    "ExpansionLine",
+    "ExpansionOut",
     "PopulationSampleCreate",
     "PopulationSampleOut",
     "PredictionRequest",
     "PredictionResultOut",
     "PredictionGeneratedCounts",
     "PredictionJobOut",
+    "InventoryItemCreate",
+    "InventoryItemOut",
+    "InventoryItemUpdate",
+    "MovementCreate",
+    "MovementOut",
+    "WarehouseCreate",
+    "WarehousePonds",
+    "WarehouseInventoryOut",
+    "WarehouseOut",
+    "WarehouseUpdate",
 ]

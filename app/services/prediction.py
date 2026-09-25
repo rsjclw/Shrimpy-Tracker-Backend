@@ -8,7 +8,7 @@ from uuid import UUID
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models import Cycle, DailyLog, FeedType, FeedingSession, Grid, Harvest, Pond, PopulationSample, Treatment, WaterParameters
+from app.models import Cycle, DailyLog, FeedingSession, Grid, Harvest, Pond, PopulationSample, Product, Treatment, WaterParameters
 from app.schemas.feeding import FeedingFeedType
 from app.schemas.prediction import (
     PredictionDailyRowOut,
@@ -159,41 +159,50 @@ async def _cumulative_feed_before(db: AsyncSession, cycle_id: UUID, start_date: 
 async def _feed_plan(db: AsyncSession, farm_id: UUID, config_data: dict, cycle: Cycle) -> list[FeedPlanRow]:
     configured = list(config_data.get("feed_plan") or [])
     if not configured:
+        # Any priced feed in the catalog is a usable default.
         result = await db.execute(
-            select(FeedType)
-            .where(FeedType.farm_id == farm_id)
-            .order_by(FeedType.created_at, FeedType.brand)
+            select(Product)
+            .where(
+                Product.farm_id == farm_id,
+                Product.category == "feed",
+                Product.active.is_(True),
+                Product.price_per_unit.isnot(None),
+            )
+            .order_by(Product.created_at, Product.name)
             .limit(1)
         )
         first = result.scalar_one_or_none()
         if first is None:
-            raise PredictionError("At least one feed type is required for prediction")
+            raise PredictionError("At least one priced feed in the catalog is required for prediction")
         configured = [
             {
-                "feed_type_id": str(first.id),
+                "product_id": str(first.id),
                 "maximum_daily_feed_kg": float(cycle.maximum_daily_feed_capacity_kg or 65),
                 "use_until_abw_g": 999,
             }
         ]
 
-    ids = [UUID(str(row["feed_type_id"])) for row in configured]
+    # `feed_type_id` is the pre-merge key; configs saved then still resolve.
+    ids = [UUID(str(row.get("product_id") or row["feed_type_id"])) for row in configured]
     result = await db.execute(
-        select(FeedType).where(FeedType.farm_id == farm_id, FeedType.id.in_(ids))
+        select(Product).where(Product.farm_id == farm_id, Product.id.in_(ids))
     )
     by_id = {feed.id: feed for feed in result.scalars().all()}
     feed_plan: list[FeedPlanRow] = []
     for index, row in enumerate(configured):
-        feed_type_id = UUID(str(row["feed_type_id"]))
-        feed_type = by_id.get(feed_type_id)
-        if feed_type is None:
-            raise PredictionError("Selected feed type is missing from this farm")
+        product_id = UUID(str(row.get("product_id") or row["feed_type_id"]))
+        feed = by_id.get(product_id)
+        if feed is None:
+            raise PredictionError("A feed in the plan is no longer in this farm's catalog. Pick it again.")
+        if feed.price_per_unit is None:
+            raise PredictionError(f"{feed.name} has no price, so the plan cannot be costed.")
         feed_plan.append(
             FeedPlanRow(
-                feed_type_id=str(feed_type.id),
-                name=f"{feed_type.brand} {feed_type.type}",
-                brand=feed_type.brand,
-                type=feed_type.type,
-                price_per_kg=float(feed_type.price_per_kg),
+                feed_type_id=str(feed.id),
+                name=feed.name,
+                brand=feed.name,
+                type="",
+                price_per_kg=float(feed.price_per_unit),
                 maximum_daily_feed_kg=_as_float(
                     row.get("maximum_daily_feed_kg"),
                     f"prediction_config.feed_plan[{index}].maximum_daily_feed_kg",
@@ -202,7 +211,7 @@ async def _feed_plan(db: AsyncSession, farm_id: UUID, config_data: dict, cycle: 
                     row.get("use_until_abw_g"),
                     f"prediction_config.feed_plan[{index}].use_until_abw_g",
                 ),
-                notes=feed_type.notes,
+                notes=feed.notes,
             )
         )
     return feed_plan
@@ -312,10 +321,9 @@ async def build_config(
 def _feed_type_out(feed: FeedPlanRow) -> list[FeedingFeedType]:
     return [
         FeedingFeedType(
-            feed_type_id=feed.feed_type_id,
-            brand=feed.brand,
-            type=feed.type,
-            price_per_kg=Decimal(str(feed.price_per_kg)),
+            product_id=feed.feed_type_id,
+            name=feed.name,
+            price_per_unit=Decimal(str(feed.price_per_kg)),
             percentage=Decimal("100"),
             notes=feed.notes,
         )
