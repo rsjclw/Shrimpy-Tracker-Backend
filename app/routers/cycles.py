@@ -1,4 +1,4 @@
-from datetime import date as ddate, datetime, time as dtime, timedelta, timezone
+from datetime import date as ddate, time as dtime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -107,6 +107,7 @@ from app.services.access import (
     require_farm_permission,
     require_pond_permission,
 )
+from app.services.clock import farm_today
 from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.feeding_schedule import feeding_sessions_for
@@ -266,7 +267,7 @@ async def update_cycle(
     # explicitly supplied one.
     if "actual_end_date" not in data:
         if next_status != "active" and cycle.actual_end_date is None:
-            today = datetime.now(timezone.utc).date()
+            today = farm_today()
             planned_end = data.get("planned_end_date", cycle.planned_end_date)
             data["actual_end_date"] = min(planned_end, today) if planned_end else today
         elif next_status == "active" and cycle.status != "active":
@@ -369,7 +370,7 @@ async def get_cycle_trend(
 ) -> TrendSeries:
     await require_cycle_permission(db, user, cycle_id)
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
-    today = datetime.now(timezone.utc).date()
+    today = farm_today()
     cycle_end = _closed_cycle_end_date(cycle, today)
     effective_to = min(date_to, cycle_end) if cycle_end else date_to
     try:

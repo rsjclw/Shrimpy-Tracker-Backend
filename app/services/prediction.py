@@ -1,7 +1,7 @@
 import asyncio
 import dataclasses
 from datetime import date as ddate
-from datetime import datetime, time as dtime, timedelta, timezone
+from datetime import time as dtime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
@@ -19,6 +19,7 @@ from app.schemas.prediction import (
     PredictionSummaryOut,
 )
 from app.services import prediction_core as core
+from app.services.clock import farm_today
 from app.services.day_view import get_prediction_baseline
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.feeding_schedule import DEFAULT_FEED_TIME, feeding_sessions_for
@@ -243,7 +244,7 @@ async def build_config(
     start_date: ddate,
     target_doc: int,
 ) -> core.Config:
-    if start_date < datetime.now(timezone.utc).date():
+    if start_date < farm_today():
         raise PredictionError("Prediction start date cannot be in the past")
     start_doc = _doc_for(cycle.start_date, start_date)
     if start_doc < 1:

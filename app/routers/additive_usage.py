@@ -1,5 +1,5 @@
 """Additive doses and usage per cycle, for dashboards and programmatic tracking."""
-from datetime import date as ddate, datetime, timezone
+from datetime import date as ddate
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -10,6 +10,7 @@ from app.database import get_db
 from app.schemas import AdditiveDoseOut, AdditiveUsageOut
 from app.services.access import require_cycle_permission
 from app.services.additives import current_doses, usage_by_day
+from app.services.clock import farm_today
 
 router = APIRouter(prefix="/cycles", tags=["additives"])
 
@@ -27,7 +28,7 @@ async def get_additive_doses(
     `dosage_gr_per_kg` out: the last dose used in the cycle, else the farm default.
     """
     access = await require_cycle_permission(db, user, cycle_id)
-    return await current_doses(db, access.farm_id, cycle_id, as_of or datetime.now(timezone.utc).date())
+    return await current_doses(db, access.farm_id, cycle_id, as_of or farm_today())
 
 
 @router.get("/{cycle_id}/additive-usage", response_model=list[AdditiveUsageOut])
