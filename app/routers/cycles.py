@@ -22,7 +22,7 @@ from app.models import (
     Treatment,
     WaterParameters,
 )
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas import (
     CycleCreate,
@@ -95,6 +95,33 @@ class BatchFeedingAbwImportOut(BaseModel):
     abw_samples_written: int
 
 
+class LateFeedOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    date: ddate
+    feed_time: dtime
+    amount_kg: Decimal
+
+
+class FinishCheckOut(BaseModel):
+    """What ending the cycle on end_date gives, and what would make it wrong (services/finish_check.py)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    end_date: ddate
+    stocked: int
+    harvested_count: int
+    harvested_kg: Decimal
+    survival_rate_pct: Decimal | None
+    feed_kg: Decimal
+    cycle_fcr: Decimal | None
+    last_harvest_date: ddate | None
+    last_harvest_time: dtime | None
+    harvests_after_end: int
+    feeds_after_final_harvest: list[LateFeedOut]
+    sample_before_final_harvest: dtime | None
+
+
 class PredictionBaselineOut(BaseModel):
     previous_biomass_kg: Decimal
     feed_since_previous_sample_start_kg: Decimal
@@ -105,6 +132,7 @@ class PredictionBaselineOut(BaseModel):
 
 from app.services.day_view import (
     MAX_DAY_VIEW_SPAN,
+    _gather as gather_cycle_rows,
     get_day_view,
     get_day_views,
     get_harvest_dates,
@@ -128,6 +156,7 @@ from app.services.blind_feeding import (
 )
 from app.services.clock import farm_today
 from app.services.common import get_or_404
+from app.services.finish_check import FinishCheck, finish_check
 from app.services.metrics import cycle_end_date
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
@@ -412,6 +441,22 @@ async def update_cycle(
     if sent & {"start_date", "actual_end_date"} and end_date is not None and start_date > end_date:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Start date cannot be after the cycle's end date")
 
+    # A cycle cannot end before its last harvest: that harvest would fall outside it, and
+    # the survival rate and FCR of its last day would miss it.
+    if end_date is not None and (next_status != "active" or "actual_end_date" in sent):
+        last_harvest = (
+            await db.execute(
+                select(func.max(DailyLog.date))
+                .join(Harvest, Harvest.daily_log_id == DailyLog.id)
+                .where(DailyLog.cycle_id == cycle.id)
+            )
+        ).scalar()
+        if last_harvest is not None and end_date < last_harvest:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"The last harvest is on {last_harvest.isoformat()}; the cycle can't end before it",
+            )
+
     anchor_feed_time = None
     if data.get("blind_feeding_template_id") is not None or recalculate:
         farm_id, anchor_feed_time = await _pond_farm_id_and_feed_time(db, cycle.pond_id)
@@ -425,6 +470,20 @@ async def update_cycle(
     await db.commit()
     await db.refresh(cycle)
     return cycle
+
+
+@router.get("/{cycle_id}/finish-check", response_model=FinishCheckOut)
+async def get_finish_check(
+    cycle_id: UUID,
+    end_date: ddate = Query(...),
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> FinishCheck:
+    """Preview of finishing on end_date: survival rate, cycle FCR, and the order mistakes to fix first."""
+    await require_cycle_permission(db, user, cycle_id)
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    feedings, _samples, abw_history, harvests = await gather_cycle_rows(db, cycle)
+    return finish_check(end_date, cycle.initial_population, feedings, harvests, abw_history)
 
 
 @router.delete("/{cycle_id}", status_code=status.HTTP_204_NO_CONTENT)
