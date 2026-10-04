@@ -75,10 +75,14 @@ class PredictionConfig(BaseModel):
 class CycleCreate(BaseModel):
     pond_id: uuid.UUID
     name: str
+    # "active": stocked now. "preparing": pond preparation starts; stocked later through /stock.
+    status: str = "active"
+    # Stocking day; for a preparing cycle the planned one.
     start_date: date
+    prep_start_date: date | None = None
     planned_end_date: date | None = None
-    initial_population: int
-    initial_abw_g: Decimal
+    initial_population: int | None = None
+    initial_abw_g: Decimal | None = None
     maximum_daily_feed_capacity_kg: Decimal | None = None
     stable_carrying_capacity_kg_per_m3: Decimal | None = None
     final_carrying_capacity_kg_per_m3: Decimal | None = None
@@ -90,6 +94,31 @@ class CycleCreate(BaseModel):
     notes: str | None = None
 
 
+    @model_validator(mode="after")
+    def stocked_now_or_preparing(self) -> "CycleCreate":
+        if self.status == "preparing":
+            if self.prep_start_date is None:
+                raise ValueError("A preparing cycle needs prep_start_date")
+            if self.start_date < self.prep_start_date:
+                raise ValueError("The planned stocking day can't be before preparation starts")
+            if (
+                self.initial_population is not None
+                or self.initial_abw_g is not None
+                or self.blind_feeding_template_id is not None
+                or self.blind_feeding_target_abw_g is not None
+            ):
+                raise ValueError("Population, ABW and blind feeding are set when the pond is stocked")
+        elif self.status == "active":
+            if self.initial_population is None or self.initial_population <= 0:
+                raise ValueError("initial_population must be above 0")
+            if self.initial_abw_g is None or self.initial_abw_g < 0:
+                raise ValueError("initial_abw_g is required")
+            if self.prep_start_date is not None:
+                raise ValueError("prep_start_date only goes with a preparing cycle")
+        else:
+            raise ValueError("A new cycle is active or preparing")
+        return self
+
 class CycleOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -97,10 +126,11 @@ class CycleOut(BaseModel):
     pond_id: uuid.UUID
     name: str
     start_date: date
+    prep_start_date: date | None = None
     planned_end_date: date | None
     actual_end_date: date | None
-    initial_population: int
-    initial_abw_g: Decimal
+    initial_population: int | None
+    initial_abw_g: Decimal | None
     maximum_daily_feed_capacity_kg: Decimal | None
     stable_carrying_capacity_kg_per_m3: Decimal | None
     final_carrying_capacity_kg_per_m3: Decimal | None

@@ -119,11 +119,15 @@ class Cycle(Base):
         UUID(as_uuid=True), ForeignKey("ponds.id", ondelete="CASCADE"), nullable=False
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Stocking day, DOC 1. While a cycle is preparing it holds the planned stocking day.
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    # The day pond preparation began; set when the cycle started as "preparing".
+    prep_start_date: Mapped[date | None] = mapped_column(Date)
     planned_end_date: Mapped[date | None] = mapped_column(Date)
     actual_end_date: Mapped[date | None] = mapped_column(Date)
-    initial_population: Mapped[int] = mapped_column(Integer, nullable=False)
-    initial_abw_g: Mapped[Decimal] = mapped_column(Numeric(10, 4), nullable=False)
+    # Known from stocking on; empty while the cycle is preparing.
+    initial_population: Mapped[int | None] = mapped_column(Integer)
+    initial_abw_g: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     maximum_daily_feed_capacity_kg: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
     stable_carrying_capacity_kg_per_m3: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))
     final_carrying_capacity_kg_per_m3: Mapped[Decimal | None] = mapped_column(Numeric(10, 3))

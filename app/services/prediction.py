@@ -285,7 +285,12 @@ async def build_config(
         pond_area_m2=float(area_m2),
         start_doc=start_doc,
         final_doc=target_doc,
-        preparation_day=int(cycle_settings.get("preparation_day", DEFAULT_CONFIG["cycle"]["preparation_day"])),
+        # Measured once the cycle came through preparation; the typed value is a guess.
+        preparation_day=(
+            (cycle.start_date - cycle.prep_start_date).days
+            if cycle.prep_start_date is not None
+            else int(cycle_settings.get("preparation_day", DEFAULT_CONFIG["cycle"]["preparation_day"]))
+        ),
         starting_population=starting_population,
         initial_abw_g=initial_abw_g,
         maximum_shrimp_size_g=_as_float(cycle_settings.get("maximum_shrimp_size_g", DEFAULT_CONFIG["cycle"]["maximum_shrimp_size_g"]), "prediction_config.cycle.maximum_shrimp_size_g"),

@@ -51,7 +51,8 @@ class CycleSummary:
     yield_t_per_1000m2: Decimal | None
     fcr: Decimal | None
     survival_rate_pct: Decimal | None
-    initial_population: int
+    # Empty for a cycle that was cancelled while preparing, never stocked.
+    initial_population: int | None
     final_population: int | None
     # Biomass of the final harvest: the last day's harvests.
     final_harvest_kg: Decimal | None
@@ -79,7 +80,7 @@ def _per_area(value: Decimal | None, area_m2: Decimal | None) -> Decimal | None:
 def cycle_summary(
     *,
     start_date: ddate,
-    initial_population: int,
+    initial_population: int | None,
     area_m2: Decimal | None,
     end_date: ddate,
     ended: bool,
@@ -121,7 +122,7 @@ def cycle_summary(
         total_revenue=sum((h.revenue for h in in_cycle), Decimal("0")),
         yield_t_per_1000m2=_per_area(total_harvest, area_m2),
         fcr=(total_feed / total_harvest).quantize(Decimal("0.01")) if total_harvest > 0 else None,
-        survival_rate_pct=M.survival_rate_pct(initial_population, harvests, end_date) if ended else None,
+        survival_rate_pct=M.survival_rate_pct(initial_population or 0, harvests, end_date) if ended else None,
         initial_population=initial_population,
         final_population=M.final_population(harvests, end_date) if ended else None,
         final_harvest_kg=sum((h.biomass_kg for h in in_cycle if h.date == end_date), Decimal("0")) if ended else None,

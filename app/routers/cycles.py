@@ -44,6 +44,9 @@ from app.schemas import (
 class CycleUpdate(BaseModel):
     name: str | None = None
     start_date: ddate | None = None
+    # The day preparation started: up to today and the stocking day, and never after a day
+    # already logged on the cycle.
+    prep_start_date: ddate | None = None
     initial_population: int | None = Field(default=None, gt=0)
     initial_abw_g: Decimal | None = Field(default=None, ge=0)
     # null clears the template; with recalculate_blind_feeding that removes the blind feeding.
@@ -152,7 +155,7 @@ class CycleSummaryOut(BaseModel):
     yield_t_per_1000m2: Decimal | None
     fcr: Decimal | None
     survival_rate_pct: Decimal | None
-    initial_population: int
+    initial_population: int | None
     final_population: int | None
     final_harvest_kg: Decimal | None
     harvested_count: int
@@ -166,6 +169,32 @@ class CycleSummaryOut(BaseModel):
     max_mortality: int | None
     max_mortality_doc: int | None
     harvests: list[HarvestLineOut]
+
+
+class StockIn(BaseModel):
+    """Stocking a preparing cycle: the day shrimp went in (DOC 1) and what went in."""
+
+    start_date: ddate
+    initial_population: int = Field(gt=0)
+    initial_abw_g: Decimal = Field(ge=0)
+    blind_feeding_template_id: UUID | None = None
+    blind_feeding_target_abw_g: Decimal | None = Field(default=None, gt=0)
+
+
+def _ensure_stocked(cycle: Cycle, day: ddate | None = None) -> None:
+    """Feed, weight, counts, harvests and predictions need shrimp in the pond: the cycle
+    must be stocked, and a dated record can't fall before stocking (DOC 1)."""
+    if cycle.initial_population is None or cycle.initial_abw_g is None:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "This cycle is still preparing: only water and treatments can be logged until the pond is stocked",
+        )
+    if day is not None and day < cycle.start_date:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"{day.isoformat()} is before stocking ({cycle.start_date.isoformat()} is DOC 1): "
+            "only water and treatments can be logged on it",
+        )
 
 
 class PredictionBaselineOut(BaseModel):
@@ -205,7 +234,7 @@ from app.services.blind_feeding import (
 from app.services.clock import farm_today
 from app.services.common import get_or_404
 from app.services.finish_check import FinishCheck, finish_check
-from app.services.metrics import cycle_end_date
+from app.services.metrics import RUNNING_STATUSES, cycle_end_date
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
 from app.services.prediction_jobs import (
@@ -425,6 +454,8 @@ async def create_cycle(
     user: CurrentUser = Depends(get_current_user),
 ) -> Cycle:
     await require_pond_permission(db, user, payload.pond_id, "add")
+    if payload.prep_start_date is not None and payload.prep_start_date > farm_today():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Preparation can't start in the future")
     farm_id, default_feed_time = await _pond_farm_id_and_feed_time(db, payload.pond_id)
     template = await _get_cycle_template(db, payload.blind_feeding_template_id, farm_id)
     data = _cycle_payload(payload)
@@ -468,17 +499,49 @@ async def update_cycle(
         if key in data and data[key] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{key} cannot be empty")
     next_status = data.get("status", cycle.status)
+    # A cycle never stocked (preparing, or a cancelled preparation) can only prepare or be
+    # cancelled; once stocked it never goes back to preparing.
+    if cycle.initial_population is None or cycle.initial_abw_g is None:
+        if next_status == "active":
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Stock the pond to start a preparing cycle")
+        if next_status not in ("preparing", "cancelled"):
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A cycle that was never stocked can only be cancelled")
+        if data.keys() & {"initial_population", "initial_abw_g", "blind_feeding_template_id", "blind_feeding_target_abw_g"}:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Population, ABW and blind feeding are set when the pond is stocked")
+    elif next_status == "preparing":
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A stocked cycle can't go back to preparing")
+
+    if "prep_start_date" in data:
+        new_prep = data["prep_start_date"]
+        if new_prep is None:
+            if next_status == "preparing":
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "A preparing cycle needs the day preparation started")
+        else:
+            if new_prep > farm_today():
+                raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Preparation can't start in the future")
+            first_logged = (
+                await db.execute(select(func.min(DailyLog.date)).where(DailyLog.cycle_id == cycle.id))
+            ).scalar()
+            if first_logged is not None and new_prep > first_logged:
+                raise HTTPException(
+                    status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    f"This cycle has logs from {first_logged.isoformat()}; preparation can't start after them",
+                )
+    if data.keys() & {"start_date", "prep_start_date"}:
+        prep = data.get("prep_start_date", cycle.prep_start_date)
+        if prep is not None and data.get("start_date", cycle.start_date) < prep:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The stocking day can't be before preparation started")
 
     # Closing a cycle must establish a durable end date. For a planned end in
     # the past, use that as the fallback; otherwise the close happened today.
     # Reopening clears an automatically maintained end unless the caller
     # explicitly supplied one.
     if "actual_end_date" not in data:
-        if next_status != "active" and cycle.actual_end_date is None:
+        if next_status not in RUNNING_STATUSES and cycle.actual_end_date is None:
             today = farm_today()
             planned_end = data.get("planned_end_date", cycle.planned_end_date)
             data["actual_end_date"] = min(planned_end, today) if planned_end else today
-        elif next_status == "active" and cycle.status != "active":
+        elif next_status in RUNNING_STATUSES and cycle.status not in RUNNING_STATUSES:
             data["actual_end_date"] = None
 
     # Only judge the dates this request sets, so an unrelated edit never trips over old data.
@@ -493,7 +556,7 @@ async def update_cycle(
     # A cycle cannot end before its last harvest: that harvest would fall outside it, and
     # the survival rate and FCR of its last day would miss it. Only harvests up to today
     # count: a later-dated one is a prediction, which ending the cycle simply leaves behind.
-    if end_date is not None and (next_status != "active" or "actual_end_date" in sent):
+    if end_date is not None and (next_status not in RUNNING_STATUSES or "actual_end_date" in sent):
         last_harvest = (
             await db.execute(
                 select(func.max(DailyLog.date))
@@ -522,6 +585,48 @@ async def update_cycle(
     return cycle
 
 
+@router.post("/{cycle_id}/stock", response_model=CycleOut)
+async def stock_cycle(
+    cycle_id: UUID,
+    payload: StockIn,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> Cycle:
+    """A preparing cycle is stocked: the stocking day becomes DOC 1, population and ABW are
+    set, blind feeding is written from that day, and the cycle runs as active."""
+    await require_cycle_permission(db, user, cycle_id, "add")
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    if cycle.status != "preparing":
+        raise HTTPException(status.HTTP_409_CONFLICT, "Only a preparing cycle can be stocked")
+    if payload.start_date > farm_today():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The stocking day can't be in the future")
+    if cycle.prep_start_date and payload.start_date < cycle.prep_start_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "The stocking day can't be before preparation started")
+    farm_id, anchor_feed_time = await _pond_farm_id_and_feed_time(db, cycle.pond_id)
+    await _get_cycle_template(db, payload.blind_feeding_template_id, farm_id)
+
+    planned_start = cycle.start_date
+    if cycle.planned_end_date is not None:
+        # Keep the target DOC: the planned end moves with the stocking day.
+        cycle.planned_end_date += payload.start_date - planned_start
+    if cycle.prediction_config and cycle.prep_start_date:
+        # The cost model's preparation days are now measured, not typed.
+        config = dict(cycle.prediction_config)
+        config["cycle"] = {**dict(config.get("cycle") or {}), "preparation_day": (payload.start_date - cycle.prep_start_date).days}
+        cycle.prediction_config = config
+    cycle.start_date = payload.start_date
+    cycle.initial_population = payload.initial_population
+    cycle.initial_abw_g = payload.initial_abw_g
+    cycle.blind_feeding_template_id = payload.blind_feeding_template_id
+    cycle.blind_feeding_target_abw_g = payload.blind_feeding_target_abw_g
+    cycle.status = "active"
+    if payload.blind_feeding_template_id is not None:
+        await _rewrite_blind_feeding(db, cycle, planned_start, None, None, anchor_feed_time)
+    await db.commit()
+    await db.refresh(cycle)
+    return cycle
+
+
 @router.get("/{cycle_id}/finish-check", response_model=FinishCheckOut)
 async def get_finish_check(
     cycle_id: UUID,
@@ -533,7 +638,7 @@ async def get_finish_check(
     await require_cycle_permission(db, user, cycle_id)
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     feedings, _samples, abw_history, harvests = await gather_cycle_rows(db, cycle)
-    return finish_check(end_date, cycle.initial_population, feedings, harvests, abw_history, farm_today())
+    return finish_check(end_date, cycle.initial_population or 0, feedings, harvests, abw_history, farm_today())
 
 
 @router.get("/{cycle_id}/summary", response_model=CycleSummaryOut)
@@ -663,6 +768,10 @@ async def upsert_cycle_day(
     # Opening the day or logging dead shrimp is an operator's job; the ABW sample and notes stay maintainer-only.
     await require_cycle_permission(db, user, cycle_id, "add" if set(data) <= {"mortality_count"} else "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    if cycle.prep_start_date and day < cycle.prep_start_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "That day is before preparation started")
+    if data.keys() & {"abw_g", "abw_sample_time", "mortality_count"}:
+        _ensure_stocked(cycle, day)
     result = await db.execute(
         select(DailyLog).where(DailyLog.cycle_id == cycle_id, DailyLog.date == day)
     )
@@ -718,6 +827,7 @@ async def get_cycle_prediction_baseline(
 ) -> PredictionBaselineOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(cycle)
     baseline = await get_prediction_baseline(db, cycle, start_date)
     return PredictionBaselineOut(**baseline)
 
@@ -731,6 +841,7 @@ async def preview_cycle_prediction(
 ) -> PredictionResultOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(cycle)
     try:
         return await preview_prediction(
             db,
@@ -751,7 +862,7 @@ async def start_cycle_prediction_preview_job(
     user: CurrentUser = Depends(get_current_user),
 ) -> PredictionJobOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
-    await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(await get_or_404(db, Cycle, cycle_id, "Cycle not found"))
     return start_prediction_job(cycle_id, user.id, payload)
 
 
@@ -788,6 +899,7 @@ async def generate_cycle_prediction_from_preview_job(
 ) -> PredictionResultOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(cycle)
     job = get_prediction_job(job_id, cycle_id, user.id)
     if job is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Prediction job not found")
@@ -807,6 +919,7 @@ async def generate_cycle_prediction(
 ) -> PredictionResultOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(cycle)
     try:
         return await generate_prediction(
             db,
@@ -827,7 +940,10 @@ async def batch_import_feedings_abw(
     user: CurrentUser = Depends(get_current_user),
 ) -> BatchFeedingAbwImportOut:
     await require_cycle_permission(db, user, cycle_id, "manage")
-    await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    _ensure_stocked(
+        await get_or_404(db, Cycle, cycle_id, "Cycle not found"),
+        min((day.date for day in payload.days), default=None),
+    )
     if not payload.days:
         return BatchFeedingAbwImportOut(
             days=0,
@@ -949,6 +1065,7 @@ async def upsert_sample(
     user: CurrentUser = Depends(get_current_user),
 ) -> PopulationSample:
     access = await require_cycle_permission(db, user, cycle_id, "add")
+    _ensure_stocked(await get_or_404(db, Cycle, cycle_id, "Cycle not found"), payload.date)
     result = await db.execute(
         select(PopulationSample).where(
             PopulationSample.cycle_id == cycle_id,

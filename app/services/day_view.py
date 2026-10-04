@@ -92,6 +92,11 @@ async def _gather(db: AsyncSession, cycle: Cycle) -> tuple[
     return feedings, samples, abw, harvests
 
 
+def _unstocked(cycle: Cycle, target: ddate) -> bool:
+    """No shrimp in the pond yet: a preparing cycle, or a preparation day before stocking."""
+    return cycle.initial_population is None or cycle.initial_abw_g is None or target < cycle.start_date
+
+
 def _compute_metrics(
     cycle: Cycle,
     target: ddate,
@@ -101,6 +106,23 @@ def _compute_metrics(
     harvests: list[M.HarvestRow],
 ) -> DayMetrics:
     doc = M.doc_for(cycle.start_date, target)
+    if _unstocked(cycle, target):
+        # Preparation: nothing to feed, weigh or count yet (DOC is 0 or below).
+        zero = Decimal("0")
+        return DayMetrics(
+            doc=doc,
+            daily_feed_kg=zero,
+            feeding_index=None,
+            cumulative_feed_kg=zero,
+            cumulative_feed_start_kg=zero,
+            cumulative_feed_end_kg=zero,
+            abw_g=None,
+            estimated_adg_g_per_day=None,
+            estimated_population=None,
+            estimated_biomass_kg=None,
+            harvest_biomass_kg=zero,
+            fcr=None,
+        )
     daily = M.daily_feed_kg(feedings, target)
     cumulative_start = M.cumulative_feed_before_date(feedings, target)
     cumulative_end = M.cumulative_feed_kg(feedings, target)
@@ -145,7 +167,7 @@ def _compute_sampling_metrics(
     cycle: Cycle,
 ) -> SamplingMetrics:
     current = next((a for a in abw_history if a.date == target), None)
-    if not current:
+    if not current or _unstocked(cycle, target):
         return SamplingMetrics(
             adg_g_per_day=None,
             abw_gain_g=None,

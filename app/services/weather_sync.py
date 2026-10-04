@@ -74,11 +74,11 @@ def is_due(grid: Grid, now: datetime, hours: list[int]) -> bool:
 async def earliest_needed_date(db: AsyncSession, grid: Grid) -> date | None:
     """Start of the oldest cycle under this grid - how far back weather matters.
 
-    A trend is plotted per cycle, so there is nothing to say about the days
-    before the grid's first stocking.
+    A trend is plotted per cycle, from its first preparation day, so there is
+    nothing to say about the days before the grid's first one.
     """
     result = await db.execute(
-        select(func.min(Cycle.start_date))
+        select(func.min(func.coalesce(Cycle.prep_start_date, Cycle.start_date)))
         .join(Pond, Pond.id == Cycle.pond_id)
         .where(Pond.grid_id == grid.id)
     )

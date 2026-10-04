@@ -74,9 +74,13 @@ def estimated_population(
     return max(candidates, key=lambda s: s.date).population
 
 
+# A cycle runs while it is preparing the pond or growing shrimp; any other status has ended it.
+RUNNING_STATUSES = ("active", "preparing")
+
+
 def cycle_end_date(cycle, today: ddate) -> ddate | None:
     """Last day of a cycle that has ended, or None while it runs. A reopened cycle keeps its end."""
-    if cycle.status == "active":
+    if cycle.status in RUNNING_STATUSES:
         return cycle.actual_end_date
 
     # Older completed cycles may predate actual_end_date being maintained.

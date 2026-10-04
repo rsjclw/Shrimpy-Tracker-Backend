@@ -211,11 +211,14 @@ async def test_build_config_uses_target_day_abw_sample(monkeypatch):
     monkeypatch.setattr(prediction, "_farm_and_area", fake_farm_and_area)
     monkeypatch.setattr(prediction, "_feed_plan", fake_feed_plan)
     monkeypatch.setattr(prediction, "_cumulative_feed_before", fake_cumulative_feed_before)
+    # The prediction starts "today": pin the farm's clock to that day.
+    monkeypatch.setattr(prediction, "farm_today", lambda: date(2026, 7, 8))
     cycle = SimpleNamespace(
         id=uuid4(),
         pond_id=uuid4(),
         start_date=date(2026, 5, 1),
-        prediction_config={},
+        prep_start_date=None,
+        prediction_config={"cycle": {"preparation_day": 12}},
         feeding_index_increment=Decimal("0.01"),
         maximum_feeding_index=Decimal("0.7"),
     )
@@ -229,6 +232,12 @@ async def test_build_config_uses_target_day_abw_sample(monkeypatch):
 
     assert config.initial_abw_g == 17.0605
     assert config.initial_cumulative_feed_kg == 1234
+    assert config.preparation_day == 12
+
+    # A cycle that came through preparation uses the measured days, not the typed guess.
+    cycle.prep_start_date = date(2026, 4, 11)
+    config = await prediction.build_config(SimpleNamespace(), cycle, date(2026, 7, 8), 70)
+    assert config.preparation_day == 20
 
 
 class _ScalarResult:

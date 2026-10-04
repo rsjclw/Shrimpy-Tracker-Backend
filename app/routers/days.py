@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
-from app.models import DailyLog, FeedingSession, Grid, Harvest, Treatment, Warehouse, WaterParameters
+from app.models import Cycle, DailyLog, FeedingSession, Grid, Harvest, Treatment, Warehouse, WaterParameters
 from app.schemas import (
     FeedingCreate,
     FeedingOut,
@@ -72,6 +72,7 @@ async def create_feeding(
     user: CurrentUser = Depends(get_current_user),
 ) -> FeedingSession:
     access = await require_daily_log_permission(db, user, daily_log_id, "add")
+    await _ensure_stocked_day(db, daily_log_id)
     log = await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
     updated_by, updated_by_type = _resolve_updated_by(payload, user)
     data = _feeding_payload(payload)
@@ -145,6 +146,24 @@ async def delete_feeding(
     await db.commit()
 
 
+async def _ensure_stocked_day(db: AsyncSession, daily_log_id: UUID) -> None:
+    """Feedings and harvests need shrimp: a preparing cycle, and the preparation days of a
+    stocked one, only take water and treatments."""
+    log = await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
+    cycle = await db.get(Cycle, log.cycle_id)
+    if cycle is not None and (cycle.initial_population is None or cycle.initial_abw_g is None):
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            "This cycle is still preparing: only water and treatments can be logged until the pond is stocked",
+        )
+    if cycle is not None and log.date < cycle.start_date:
+        raise HTTPException(
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            f"{log.date.isoformat()} is before stocking ({cycle.start_date.isoformat()} is DOC 1): "
+            "only water and treatments can be logged on it",
+        )
+
+
 async def _ensure_last_harvest_day(db: AsyncSession, log: DailyLog) -> None:
     """Harvests only change on the cycle's last harvest day (or a later day). Once a later
     harvest exists an earlier harvest day is closed, so its numbers - and the ABW sample
@@ -176,6 +195,7 @@ async def create_harvest(
     user: CurrentUser = Depends(get_current_user),
 ) -> Harvest:
     await require_daily_log_permission(db, user, daily_log_id, "add")
+    await _ensure_stocked_day(db, daily_log_id)
     log = await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
     await _ensure_last_harvest_day(db, log)
     data = payload.model_dump()
