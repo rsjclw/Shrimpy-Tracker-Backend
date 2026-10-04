@@ -304,6 +304,9 @@ async def test_adg_trend_uses_estimated_daily_gain(monkeypatch):
         start_date=date(2026, 5, 1),
         initial_abw_g=Decimal("1.0"),
         initial_population=100_000,
+        status="active",
+        actual_end_date=None,
+        planned_end_date=None,
     )
 
     points = await day_view.get_trend(
@@ -336,6 +339,9 @@ async def test_feeding_index_trend_matches_daily_feed_population_and_doc(monkeyp
         start_date=date(2026, 5, 1),
         initial_abw_g=Decimal("1.0"),
         initial_population=100_000,
+        status="active",
+        actual_end_date=None,
+        planned_end_date=None,
     )
 
     points = await day_view.get_trend(
@@ -394,6 +400,9 @@ async def test_prediction_baseline_exposes_target_day_abw_sample(monkeypatch):
         start_date=date(2026, 5, 1),
         initial_abw_g=Decimal("1.0"),
         initial_population=100_000,
+        status="active",
+        actual_end_date=None,
+        planned_end_date=None,
     )
 
     baseline = await day_view.get_prediction_baseline(

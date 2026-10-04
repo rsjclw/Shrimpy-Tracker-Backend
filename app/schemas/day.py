@@ -32,6 +32,10 @@ class DayMetrics(BaseModel):
     estimated_biomass_kg: Decimal | None
     harvest_biomass_kg: Decimal
     fcr: Decimal | None
+    # Shrimp harvested up to this day (estimated from each harvest's weight and ABW).
+    harvested_count: int = 0
+    # Harvested over stocked, %: only on and after an ended cycle's last day.
+    survival_rate_pct: Decimal | None = None
 
 
 class LunarDayOut(BaseModel):

@@ -30,6 +30,7 @@ from app.services.access import grid_for_cycle
 from app.services.lunar import lunar_day
 from app.schemas.water import BIOLOGY_COMPUTED_FIELDS, BIOLOGY_SOURCE_FIELDS, water_metric_value
 from app.services import metrics as M
+from app.services.clock import farm_today
 
 
 def _feeding_index(daily_feed_kg: Decimal, doc: int, population: int | None) -> Decimal | None:
@@ -103,7 +104,11 @@ def _compute_metrics(
     daily = M.daily_feed_kg(feedings, target)
     cumulative_start = M.cumulative_feed_before_date(feedings, target)
     cumulative_end = M.cumulative_feed_kg(feedings, target)
-    pop = M.estimated_population_end_of_day(cycle.initial_population, samples, harvests, target)
+    end_date = M.cycle_end_date(cycle, farm_today())
+    ended = end_date is not None and target >= end_date
+    pop = M.estimated_population_end_of_day(
+        cycle.initial_population, samples, harvests, target, M.pond_empty_at(end_date, harvests)
+    )
     abw = M.estimated_abw_g(cycle.initial_abw_g, feedings, abw_history, target)
     abw_yesterday = M.estimated_abw_g(cycle.initial_abw_g, feedings, abw_history, target - timedelta(days=1))
     estimated_adg = (abw - abw_yesterday).quantize(Decimal("0.0001")) if abw is not None and abw_yesterday is not None else None
@@ -125,6 +130,8 @@ def _compute_metrics(
         estimated_biomass_kg=biomass,
         harvest_biomass_kg=harvested,
         fcr=fcr_value,
+        harvested_count=M.harvested_count(harvests, target),
+        survival_rate_pct=M.survival_rate_pct(cycle.initial_population, harvests, target) if ended else None,
     )
 
 
@@ -151,11 +158,13 @@ def _compute_sampling_metrics(
         if previous_samples
         else M.AbwRow(date=cycle.start_date, abw_g=cycle.initial_abw_g, sample_time=dtime(0, 0))
     )
+    # A sample after the final harvest of an ended cycle sees the empty pond.
+    empty_at = M.pond_empty_at(M.cycle_end_date(cycle, farm_today()), harvests)
     previous_pop = M.estimated_population_at(
-        cycle.initial_population, samples, harvests, previous.sampled_at
+        cycle.initial_population, samples, harvests, previous.sampled_at, empty_at
     )
     current_pop = M.estimated_population_at(
-        cycle.initial_population, samples, harvests, current.sampled_at
+        cycle.initial_population, samples, harvests, current.sampled_at, empty_at
     )
     previous_biomass = M.estimated_biomass_kg(previous_pop, previous.abw_g)
     current_biomass = M.estimated_biomass_kg(current_pop, current.abw_g)

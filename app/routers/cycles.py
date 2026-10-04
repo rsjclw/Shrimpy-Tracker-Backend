@@ -128,6 +128,7 @@ from app.services.blind_feeding import (
 )
 from app.services.clock import farm_today
 from app.services.common import get_or_404
+from app.services.metrics import cycle_end_date
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
 from app.services.prediction_jobs import (
@@ -150,14 +151,7 @@ def _cycle_payload(payload: CycleCreate | CycleUpdate, exclude_unset: bool = Fal
 
 def _closed_cycle_end_date(cycle: Cycle, today: ddate) -> ddate | None:
     """Return the last plottable date for a closed cycle."""
-    if cycle.status == "active":
-        return cycle.actual_end_date
-
-    # Older completed cycles may predate actual_end_date being maintained.
-    # Their planned end is the best available boundary. Never let a closed
-    # cycle extend into the future, even if that planned date is still ahead.
-    end_date = cycle.actual_end_date or cycle.planned_end_date or today
-    return min(end_date, today)
+    return cycle_end_date(cycle, today)
 
 
 async def _pond_farm_id_and_feed_time(db: AsyncSession, pond_id: UUID) -> tuple[UUID, dtime]:
