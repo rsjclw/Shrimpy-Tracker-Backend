@@ -13,8 +13,11 @@ HARVESTS = [
 FINAL_SAMPLE = M.AbwRow(date=H, abw_g=Decimal("20"), sample_time=time(14, 31))
 
 
+TODAY = date(2026, 10, 4)
+
+
 def _check(end=H, feeds=FEEDS, harvests=HARVESTS, abw=(FINAL_SAMPLE,)):
-    return finish_check(end, 100_000, list(feeds), list(harvests), list(abw))
+    return finish_check(end, 100_000, list(feeds), list(harvests), list(abw), TODAY)
 
 
 def test_the_right_order_gives_survival_and_cycle_fcr_and_nothing_to_fix():
@@ -59,3 +62,10 @@ def test_ending_before_the_final_harvest_is_caught():
 def test_no_harvest_at_all():
     c = _check(harvests=[], abw=())
     assert (c.harvested_count, c.survival_rate_pct, c.cycle_fcr, c.last_harvest_date) == (0, Decimal("0.0"), None, None)
+
+
+def test_a_predicted_harvest_after_today_neither_points_nor_blocks():
+    predicted = M.HarvestRow(date=date(2026, 10, 19), harvest_time=time(5, 0), biomass_kg=Decimal("1440"), estimated_count=50_000)
+    c = _check(end=H, harvests=[*HARVESTS, predicted])
+    assert (c.last_harvest_date, c.harvests_after_end) == (H, 0)
+    assert c.survival_rate_pct == Decimal("70.0")

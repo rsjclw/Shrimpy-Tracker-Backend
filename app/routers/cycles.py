@@ -442,13 +442,14 @@ async def update_cycle(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Start date cannot be after the cycle's end date")
 
     # A cycle cannot end before its last harvest: that harvest would fall outside it, and
-    # the survival rate and FCR of its last day would miss it.
+    # the survival rate and FCR of its last day would miss it. Only harvests up to today
+    # count: a later-dated one is a prediction, which ending the cycle simply leaves behind.
     if end_date is not None and (next_status != "active" or "actual_end_date" in sent):
         last_harvest = (
             await db.execute(
                 select(func.max(DailyLog.date))
                 .join(Harvest, Harvest.daily_log_id == DailyLog.id)
-                .where(DailyLog.cycle_id == cycle.id)
+                .where(DailyLog.cycle_id == cycle.id, DailyLog.date <= farm_today())
             )
         ).scalar()
         if last_harvest is not None and end_date < last_harvest:
@@ -483,7 +484,7 @@ async def get_finish_check(
     await require_cycle_permission(db, user, cycle_id)
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     feedings, _samples, abw_history, harvests = await gather_cycle_rows(db, cycle)
-    return finish_check(end_date, cycle.initial_population, feedings, harvests, abw_history)
+    return finish_check(end_date, cycle.initial_population, feedings, harvests, abw_history, farm_today())
 
 
 @router.delete("/{cycle_id}", status_code=status.HTTP_204_NO_CONTENT)

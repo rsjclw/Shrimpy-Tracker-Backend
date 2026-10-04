@@ -48,10 +48,14 @@ def finish_check(
     feedings: list[M.FeedingRow],
     harvests: list[M.HarvestRow],
     abw_history: list[M.AbwRow],
+    today: ddate,
 ) -> FinishCheck:
     harvested_kg = sum((h.biomass_kg for h in harvests if h.date <= end_date), Decimal("0"))
     feed_kg = M.cumulative_feed_kg(feedings, end_date)
-    last = max(harvests, key=lambda h: h.harvested_at, default=None)
+    # Harvests dated after today are predictions or plans: they neither point to the last day
+    # nor stop the cycle from ending before them.
+    happened = [h for h in harvests if h.date <= today]
+    last = max(happened, key=lambda h: h.harvested_at, default=None)
     empty_at = M.pond_empty_at(end_date, harvests)
     final_harvests_on_end = [h for h in harvests if h.date == end_date]
 
@@ -76,7 +80,7 @@ def finish_check(
         cycle_fcr=(feed_kg / harvested_kg).quantize(Decimal("0.01")) if harvested_kg > 0 else None,
         last_harvest_date=last.date if last else None,
         last_harvest_time=last.harvest_time if last else None,
-        harvests_after_end=sum(1 for h in harvests if h.date > end_date),
+        harvests_after_end=sum(1 for h in happened if h.date > end_date),
         feeds_after_final_harvest=sorted(late, key=lambda f: f.feed_time),
         sample_before_final_harvest=early_sample,
     )

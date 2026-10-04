@@ -31,6 +31,7 @@ from app.services.access import (
 )
 from app.services.additives import resolve_additives
 from app.services.harvest_sample import resync_harvest_sample
+from app.services.clock import farm_today
 from app.services.common import apply_updates, get_or_404
 from app.services.inventory import MovementError, consume_products, reverse_source
 from app.services.products import ProductError, expand, load_catalog
@@ -147,12 +148,13 @@ async def delete_feeding(
 async def _ensure_last_harvest_day(db: AsyncSession, log: DailyLog) -> None:
     """Harvests only change on the cycle's last harvest day (or a later day). Once a later
     harvest exists an earlier harvest day is closed, so its numbers - and the ABW sample
-    taken from them - stay as they were."""
+    taken from them - stay as they were. Only harvests up to today count: a later-dated
+    one is a prediction or plan, not a harvest that happened."""
     later = (
         await db.execute(
             select(func.max(DailyLog.date))
             .join(Harvest, Harvest.daily_log_id == DailyLog.id)
-            .where(DailyLog.cycle_id == log.cycle_id, DailyLog.date > log.date)
+            .where(DailyLog.cycle_id == log.cycle_id, DailyLog.date > log.date, DailyLog.date <= farm_today())
         )
     ).scalar()
     if later is not None:
