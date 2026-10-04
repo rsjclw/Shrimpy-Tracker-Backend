@@ -3,7 +3,7 @@ from decimal import Decimal, ROUND_HALF_UP
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CurrentUser, get_current_user
@@ -144,6 +144,24 @@ async def delete_feeding(
     await db.commit()
 
 
+async def _ensure_last_harvest_day(db: AsyncSession, log: DailyLog) -> None:
+    """Harvests only change on the cycle's last harvest day (or a later day). Once a later
+    harvest exists an earlier harvest day is closed, so its numbers - and the ABW sample
+    taken from them - stay as they were."""
+    later = (
+        await db.execute(
+            select(func.max(DailyLog.date))
+            .join(Harvest, Harvest.daily_log_id == DailyLog.id)
+            .where(DailyLog.cycle_id == log.cycle_id, DailyLog.date > log.date)
+        )
+    ).scalar()
+    if later is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Harvests before the last harvest day ({later.isoformat()}) can't be changed",
+        )
+
+
 @router.post(
     "/days/{daily_log_id}/harvests",
     response_model=HarvestOut,
@@ -156,7 +174,8 @@ async def create_harvest(
     user: CurrentUser = Depends(get_current_user),
 ) -> Harvest:
     await require_daily_log_permission(db, user, daily_log_id, "add")
-    await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
+    log = await get_or_404(db, DailyLog, daily_log_id, "Daily log not found")
+    await _ensure_last_harvest_day(db, log)
     data = payload.model_dump()
     data["estimated_count"] = _estimated_harvest_count(payload.biomass_kg, payload.sampled_abw_g)
     harvest = Harvest(daily_log_id=daily_log_id, **data)
@@ -177,6 +196,7 @@ async def update_harvest(
 ) -> Harvest:
     await require_harvest_permission(db, user, harvest_id, "manage")
     harvest = await get_or_404(db, Harvest, harvest_id, "Harvest not found")
+    await _ensure_last_harvest_day(db, await get_or_404(db, DailyLog, harvest.daily_log_id, "Daily log not found"))
     apply_updates(harvest, payload)
     if payload.biomass_kg is not None or payload.sampled_abw_g is not None:
         harvest.estimated_count = _estimated_harvest_count(harvest.biomass_kg, harvest.sampled_abw_g)
@@ -196,6 +216,7 @@ async def delete_harvest(
     await require_harvest_permission(db, user, harvest_id, "manage")
     harvest = await get_or_404(db, Harvest, harvest_id, "Harvest not found")
     daily_log_id = harvest.daily_log_id
+    await _ensure_last_harvest_day(db, await get_or_404(db, DailyLog, daily_log_id, "Daily log not found"))
     await db.delete(harvest)
     await db.flush()
     await resync_harvest_sample(db, daily_log_id)
