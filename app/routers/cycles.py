@@ -49,8 +49,9 @@ class CycleUpdate(BaseModel):
     # null clears the template; with recalculate_blind_feeding that removes the blind feeding.
     blind_feeding_template_id: UUID | None = None
     blind_feeding_target_abw_g: Decimal | None = Field(default=None, gt=0)
-    # Changing the start date, population, template or target ABW leaves the feedings
-    # alone unless this is set; then the blind-feeding rows are rewritten from scratch.
+    # Changing the start date or population leaves the feedings alone unless this is set;
+    # then the blind-feeding rows are rewritten from scratch. Changing the template or its
+    # target always rewrites them: those are the plan itself.
     recalculate_blind_feeding: bool = False
     planned_end_date: ddate | None = None
     actual_end_date: ddate | None = None
@@ -386,6 +387,11 @@ async def update_cycle(
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     data = _cycle_payload(payload, exclude_unset=True)
     recalculate = data.pop("recalculate_blind_feeding", False)
+    # A new template or target always rewrites the plan, so the cycle never names a plan
+    # its feedings and target sample don't follow (a recalculation finds the old sample by
+    # the cycle's target, which must still be the value that was written).
+    if any(key in data and data[key] != getattr(cycle, key) for key in ("blind_feeding_template_id", "blind_feeding_target_abw_g")):
+        recalculate = True
     for key in ("start_date", "initial_population", "initial_abw_g"):
         if key in data and data[key] is None:
             raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{key} cannot be empty")
