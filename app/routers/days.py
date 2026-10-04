@@ -30,6 +30,7 @@ from app.services.access import (
     require_treatment_permission,
 )
 from app.services.additives import resolve_additives
+from app.services.harvest_sample import resync_harvest_sample
 from app.services.common import apply_updates, get_or_404
 from app.services.inventory import MovementError, consume_products, reverse_source
 from app.services.products import ProductError, expand, load_catalog
@@ -160,6 +161,8 @@ async def create_harvest(
     data["estimated_count"] = _estimated_harvest_count(payload.biomass_kg, payload.sampled_abw_g)
     harvest = Harvest(daily_log_id=daily_log_id, **data)
     db.add(harvest)
+    await db.flush()
+    await resync_harvest_sample(db, daily_log_id)
     await db.commit()
     await db.refresh(harvest)
     return harvest
@@ -177,6 +180,8 @@ async def update_harvest(
     apply_updates(harvest, payload)
     if payload.biomass_kg is not None or payload.sampled_abw_g is not None:
         harvest.estimated_count = _estimated_harvest_count(harvest.biomass_kg, harvest.sampled_abw_g)
+    await db.flush()
+    await resync_harvest_sample(db, harvest.daily_log_id)
     await db.commit()
     await db.refresh(harvest)
     return harvest
@@ -190,7 +195,10 @@ async def delete_harvest(
 ) -> None:
     await require_harvest_permission(db, user, harvest_id, "manage")
     harvest = await get_or_404(db, Harvest, harvest_id, "Harvest not found")
+    daily_log_id = harvest.daily_log_id
     await db.delete(harvest)
+    await db.flush()
+    await resync_harvest_sample(db, daily_log_id)
     await db.commit()
 
 
