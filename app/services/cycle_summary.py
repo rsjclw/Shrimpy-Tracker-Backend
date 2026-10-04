@@ -29,6 +29,7 @@ class HarvestLine:
     harvest_time: dtime
     biomass_kg: Decimal
     abw_g: Decimal
+    # Size: shrimp per kg at the harvest's ABW.
     size_pcs_per_kg: int | None
     count: int
     revenue: Decimal
@@ -44,12 +45,16 @@ class CycleSummary:
     area_m2: Decimal | None
     total_harvest_kg: Decimal
     total_feed_kg: Decimal
+    # What the harvests sold for, all of them up to the last day.
+    total_revenue: Decimal
     # Total harvest over pond area: t per 1,000 m2, which is the same number as kg/m2.
     yield_t_per_1000m2: Decimal | None
     fcr: Decimal | None
     survival_rate_pct: Decimal | None
     initial_population: int
     final_population: int | None
+    # Biomass of the final harvest: the last day's harvests.
+    final_harvest_kg: Decimal | None
     harvested_count: int
     final_abw_g: Decimal | None
     # Final ABW over total DOC.
@@ -113,11 +118,13 @@ def cycle_summary(
         area_m2=area_m2,
         total_harvest_kg=total_harvest,
         total_feed_kg=total_feed,
+        total_revenue=sum((h.revenue for h in in_cycle), Decimal("0")),
         yield_t_per_1000m2=_per_area(total_harvest, area_m2),
         fcr=(total_feed / total_harvest).quantize(Decimal("0.01")) if total_harvest > 0 else None,
         survival_rate_pct=M.survival_rate_pct(initial_population, harvests, end_date) if ended else None,
         initial_population=initial_population,
         final_population=M.final_population(harvests, end_date) if ended else None,
+        final_harvest_kg=sum((h.biomass_kg for h in in_cycle if h.date == end_date), Decimal("0")) if ended else None,
         harvested_count=M.harvested_count(harvests, end_date),
         final_abw_g=final_abw,
         average_adg_g_per_day=(final_abw / end_doc).quantize(Decimal("0.01")) if final_abw is not None and end_doc > 0 else None,

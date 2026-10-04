@@ -33,6 +33,7 @@ def test_basic_stats():
     s = _summary()
     assert s.total_harvest_kg == Decimal("1700")
     assert s.total_feed_kg == Decimal("1200")
+    assert s.total_revenue == Decimal("82000000")  # partial 12m + final 70m
     assert s.yield_t_per_1000m2 == Decimal("1.70")  # 1,700 kg on 1,000 m2
     assert s.fcr == Decimal("0.71")
     assert s.survival_rate_pct == Decimal("90.0")
@@ -41,6 +42,7 @@ def test_basic_stats():
 def test_details():
     s = _summary()
     assert (s.initial_population, s.final_population, s.harvested_count) == (100_000, 70_000, 90_000)
+    assert s.final_harvest_kg == Decimal("1400")  # the last day's harvest only
     assert s.doc == 100 and s.final_abw_g == Decimal("20")
     assert s.average_adg_g_per_day == Decimal("0.20")  # 20 g over 100 days
     assert (s.max_biomass_kg, s.max_biomass_doc) == (Decimal("1820.1"), 91)
@@ -68,5 +70,5 @@ def test_without_mortality_records_max_mortality_is_empty():
 
 def test_a_running_cycle_has_no_survival_or_final_population_yet():
     s = _summary(ended=False)
-    assert s.survival_rate_pct is None and s.final_population is None
+    assert s.survival_rate_pct is None and s.final_population is None and s.final_harvest_kg is None
     assert not any(h.final for h in s.harvests)

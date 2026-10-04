@@ -148,11 +148,13 @@ class CycleSummaryOut(BaseModel):
     area_m2: Decimal | None
     total_harvest_kg: Decimal
     total_feed_kg: Decimal
+    total_revenue: Decimal
     yield_t_per_1000m2: Decimal | None
     fcr: Decimal | None
     survival_rate_pct: Decimal | None
     initial_population: int
     final_population: int | None
+    final_harvest_kg: Decimal | None
     harvested_count: int
     final_abw_g: Decimal | None
     average_adg_g_per_day: Decimal | None
