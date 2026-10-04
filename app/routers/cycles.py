@@ -123,6 +123,49 @@ class FinishCheckOut(BaseModel):
     sample_before_final_harvest: dtime | None
 
 
+class HarvestLineOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    date: ddate
+    doc: int
+    harvest_time: dtime
+    biomass_kg: Decimal
+    abw_g: Decimal
+    size_pcs_per_kg: int | None
+    count: int
+    revenue: Decimal
+    final: bool
+
+
+class CycleSummaryOut(BaseModel):
+    """A cycle's results for the past-cycles cards (services/cycle_summary.py)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    ended: bool
+    end_date: ddate
+    doc: int
+    area_m2: Decimal | None
+    total_harvest_kg: Decimal
+    total_feed_kg: Decimal
+    yield_t_per_1000m2: Decimal | None
+    fcr: Decimal | None
+    survival_rate_pct: Decimal | None
+    initial_population: int
+    final_population: int | None
+    harvested_count: int
+    final_abw_g: Decimal | None
+    average_adg_g_per_day: Decimal | None
+    max_biomass_kg: Decimal | None
+    max_biomass_doc: int | None
+    max_carrying_capacity_kg_m2: Decimal | None
+    highest_daily_feed_kg: Decimal | None
+    highest_daily_feed_doc: int | None
+    max_mortality: int | None
+    max_mortality_doc: int | None
+    harvests: list[HarvestLineOut]
+
+
 class PredictionBaselineOut(BaseModel):
     previous_biomass_kg: Decimal
     feed_since_previous_sample_start_kg: Decimal
@@ -131,8 +174,10 @@ class PredictionBaselineOut(BaseModel):
     initial_abw_g: Decimal | None = None
 
 
+from app.services.cycle_summary import CycleSummary, HarvestIn, cycle_summary
 from app.services.day_view import (
     MAX_DAY_VIEW_SPAN,
+    _compute_metrics as compute_day_metrics,
     _gather as gather_cycle_rows,
     get_day_view,
     get_day_views,
@@ -487,6 +532,66 @@ async def get_finish_check(
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     feedings, _samples, abw_history, harvests = await gather_cycle_rows(db, cycle)
     return finish_check(end_date, cycle.initial_population, feedings, harvests, abw_history, farm_today())
+
+
+@router.get("/{cycle_id}/summary", response_model=CycleSummaryOut)
+async def get_cycle_summary(
+    cycle_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> CycleSummary:
+    """The cycle's results up to its last day (or today while it runs)."""
+    await require_cycle_permission(db, user, cycle_id)
+    cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
+    today = farm_today()
+    end = cycle_end_date(cycle, today)
+    ended = end is not None
+    end = end or today
+    feedings, samples, abw_history, harvests = await gather_cycle_rows(db, cycle)
+    area = (await db.execute(select(Pond.area_m2).where(Pond.id == cycle.pond_id))).scalar()
+    details = (
+        await db.execute(
+            select(
+                DailyLog.date,
+                Harvest.harvest_time,
+                Harvest.biomass_kg,
+                Harvest.sampled_abw_g,
+                Harvest.estimated_count,
+                Harvest.total_price,
+            )
+            .join(Harvest, Harvest.daily_log_id == DailyLog.id)
+            .where(DailyLog.cycle_id == cycle.id)
+        )
+    ).all()
+    mortality = dict(
+        (
+            await db.execute(
+                select(DailyLog.date, DailyLog.mortality_count).where(
+                    DailyLog.cycle_id == cycle.id, DailyLog.mortality_count.is_not(None)
+                )
+            )
+        ).all()
+    )
+    daily_biomass = {}
+    current = cycle.start_date
+    while current <= end:
+        daily_biomass[current] = compute_day_metrics(
+            cycle, current, feedings, samples, abw_history, harvests
+        ).estimated_biomass_kg
+        current += timedelta(days=1)
+    return cycle_summary(
+        start_date=cycle.start_date,
+        initial_population=cycle.initial_population,
+        area_m2=area,
+        end_date=end,
+        ended=ended,
+        feedings=feedings,
+        harvests=harvests,
+        harvest_details=[HarvestIn(*row) for row in details],
+        abw_history=abw_history,
+        mortality=mortality,
+        daily_biomass=daily_biomass,
+    )
 
 
 @router.delete("/{cycle_id}", status_code=status.HTTP_204_NO_CONTENT)
