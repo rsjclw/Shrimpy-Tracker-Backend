@@ -1,10 +1,12 @@
+from collections.abc import Callable
 from datetime import date as ddate, time as dtime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, select
+from sqlalchemy import and_, delete, exists, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
@@ -41,6 +43,15 @@ from app.schemas import (
 
 class CycleUpdate(BaseModel):
     name: str | None = None
+    start_date: ddate | None = None
+    initial_population: int | None = Field(default=None, gt=0)
+    initial_abw_g: Decimal | None = Field(default=None, ge=0)
+    # null clears the template; with recalculate_blind_feeding that removes the blind feeding.
+    blind_feeding_template_id: UUID | None = None
+    blind_feeding_target_abw_g: Decimal | None = Field(default=None, gt=0)
+    # Changing the start date, population, template or target ABW leaves the feedings
+    # alone unless this is set; then the blind-feeding rows are rewritten from scratch.
+    recalculate_blind_feeding: bool = False
     planned_end_date: ddate | None = None
     actual_end_date: ddate | None = None
     status: str | None = None
@@ -107,10 +118,16 @@ from app.services.access import (
     require_farm_permission,
     require_pond_permission,
 )
+from app.services.blind_feeding import (
+    BLIND_NOTE,
+    TARGET_SAMPLE_TIME,
+    BlindFeedingPlan,
+    blind_feeding_window,
+    plan_blind_feeding,
+)
 from app.services.clock import farm_today
 from app.services.common import get_or_404
 from app.services.feeding_amounts import round_feed_amount_kg
-from app.services.feeding_schedule import feeding_sessions_for
 from app.services.prediction import PredictionError, apply_prediction_result, generate_prediction, preview_prediction
 from app.services.prediction_jobs import (
     get_latest_active_prediction_job,
@@ -167,34 +184,142 @@ async def _get_cycle_template(
     return template
 
 
-def _blind_feeding_amount(rate_per_100k: float, population: int) -> Decimal:
-    amount = Decimal(str(rate_per_100k)) * Decimal(population) / Decimal("100000")
-    return round_feed_amount_kg(amount)
+def _blind_feeding_plan(cycle: Cycle, template: BlindFeedingTemplate, anchor_feed_time: dtime) -> BlindFeedingPlan:
+    return plan_blind_feeding(
+        cycle.start_date,
+        cycle.initial_population,
+        template.daily_feed_per_100k,
+        anchor_feed_time,
+        cycle.blind_feeding_target_abw_g,
+    )
 
 
-def _add_blind_feedings(cycle: Cycle, template: BlindFeedingTemplate, anchor_feed_time: dtime) -> None:
-    sessions = feeding_sessions_for(anchor_feed_time)
-    for day_index, rate in enumerate(template.daily_feed_per_100k):
-        total = _blind_feeding_amount(rate, cycle.initial_population)
-        log = DailyLog(cycle=cycle, date=cycle.start_date + timedelta(days=day_index))
-        for feed_time, fraction in sessions:
+def _write_blind_feedings(
+    plan: BlindFeedingPlan, template: BlindFeedingTemplate, log_for: Callable[[ddate], DailyLog]
+) -> None:
+    for day in plan.days:
+        log = log_for(day.date)
+        for feed_time, amount_kg in day.sessions:
             log.feedings.append(
                 FeedingSession(
                     feed_time=feed_time,
-                    amount_kg=round_feed_amount_kg(total * fraction),
+                    amount_kg=amount_kg,
                     additives=[],
                     feed_types=[],
-                    notes=f"Blind feeding: {template.name} DOC {day_index + 1}",
+                    notes=f"{BLIND_NOTE}{template.name} DOC {day.doc}",
                 )
             )
-    if cycle.blind_feeding_target_abw_g is not None:
-        sampling_date = cycle.start_date + timedelta(days=len(template.daily_feed_per_100k))
-        DailyLog(
-            cycle=cycle,
-            date=sampling_date,
-            abw_g=cycle.blind_feeding_target_abw_g,
-            abw_sample_time=dtime(5, 0),
+    if plan.target_sample is not None:
+        sample_date, abw_g = plan.target_sample
+        log = log_for(sample_date)
+        log.abw_g = abw_g
+        log.abw_sample_time = TARGET_SAMPLE_TIME
+
+
+async def _template_by_id(db: AsyncSession, template_id: UUID | None) -> BlindFeedingTemplate | None:
+    return await db.get(BlindFeedingTemplate, template_id) if template_id else None
+
+
+async def _rewrite_blind_feeding(
+    db: AsyncSession,
+    cycle: Cycle,
+    old_start: ddate,
+    old_template_id: UUID | None,
+    old_target_abw_g: Decimal | None,
+    anchor_feed_time: dtime,
+) -> None:
+    """Strictly redo the blind feeding after its inputs changed: clear every feeding
+    the template wrote (wherever an earlier "just move" left it) and every feeding
+    inside the old and the new template window, drop the old target-ABW sample, then
+    write the plan from the cycle's current start date, population, template and
+    target. Nothing in there is kept, edited or not - the user chose this."""
+    old_template = await _template_by_id(db, old_template_id)
+    new_template = await _template_by_id(db, cycle.blind_feeding_template_id)
+    old_days = len(old_template.daily_feed_per_100k) if old_template else 0
+    new_days = len(new_template.daily_feed_per_100k) if new_template else 0
+    windows = [
+        w for w in (blind_feeding_window(old_start, old_days), blind_feeding_window(cycle.start_date, new_days)) if w
+    ]
+    cycle_logs = select(DailyLog.id).where(DailyLog.cycle_id == cycle.id)
+    template_rows = and_(FeedingSession.daily_log_id.in_(cycle_logs), FeedingSession.notes.like(f"{BLIND_NOTE}%"))
+    first_row_day, last_row_day = (
+        await db.execute(
+            select(func.min(DailyLog.date), func.max(DailyLog.date))
+            .join(FeedingSession, FeedingSession.daily_log_id == DailyLog.id)
+            .where(template_rows)
         )
+    ).one()
+
+    # Where the template put its target sample: the day after its window, as planned or as the rows now sit.
+    sample_dates = set()
+    if old_target_abw_g is not None:
+        if old_template:
+            sample_dates.add(old_start + timedelta(days=old_days))
+        if last_row_day is not None:
+            sample_dates.add(last_row_day + timedelta(days=1))
+    touched = [DailyLog.date.between(first, last) for first, last in windows]
+    if first_row_day is not None:
+        touched.append(DailyLog.date.between(first_row_day, last_row_day))
+    if sample_dates:
+        touched.append(DailyLog.date.in_(sorted(sample_dates)))
+    if not touched:
+        return
+
+    cleared = template_rows
+    if windows:
+        window_logs = cycle_logs.where(or_(*(DailyLog.date.between(first, last) for first, last in windows)))
+        cleared = or_(template_rows, FeedingSession.daily_log_id.in_(window_logs))
+    await db.execute(delete(FeedingSession).where(cleared))
+    if sample_dates:
+        # The sample the template wrote: one of those dates, its dawn time and the old target value.
+        await db.execute(
+            update(DailyLog)
+            .where(
+                DailyLog.cycle_id == cycle.id,
+                DailyLog.date.in_(sorted(sample_dates)),
+                DailyLog.abw_g == old_target_abw_g,
+                DailyLog.abw_sample_time == TARGET_SAMPLE_TIME,
+            )
+            .values(abw_g=None, abw_sample_time=None)
+        )
+
+    if new_template is not None:
+        plan = _blind_feeding_plan(cycle, new_template, anchor_feed_time)
+        plan_dates = [day.date for day in plan.days]
+        if plan.target_sample is not None:
+            plan_dates.append(plan.target_sample[0])
+        result = await db.execute(
+            select(DailyLog)
+            .options(selectinload(DailyLog.feedings))
+            .where(DailyLog.cycle_id == cycle.id, DailyLog.date.in_(plan_dates))
+            .execution_options(populate_existing=True)
+        )
+        logs = {log.date: log for log in result.scalars()}
+
+        def log_for(day: ddate) -> DailyLog:
+            log = logs.get(day)
+            if log is None:
+                log = DailyLog(cycle_id=cycle.id, date=day, feedings=[])
+                db.add(log)
+                logs[day] = log
+            return log
+
+        _write_blind_feedings(plan, new_template, log_for)
+        await db.flush()
+
+    # Days the clearing left with nothing on them go too, so a moved plan leaves no empty days behind.
+    await db.execute(
+        delete(DailyLog).where(
+            DailyLog.cycle_id == cycle.id,
+            or_(*touched),
+            DailyLog.abw_g.is_(None),
+            DailyLog.notes.is_(None),
+            ~exists().where(FeedingSession.daily_log_id == DailyLog.id),
+            ~exists().where(WaterParameters.daily_log_id == DailyLog.id),
+            ~exists().where(Treatment.daily_log_id == DailyLog.id),
+            ~exists().where(Harvest.daily_log_id == DailyLog.id),
+        )
+    )
 
 
 @router.get("", response_model=list[CycleOut])
@@ -232,7 +357,8 @@ async def create_cycle(
     data = _cycle_payload(payload)
     cycle = Cycle(**data)
     if template:
-        _add_blind_feedings(cycle, template, default_feed_time)
+        plan = _blind_feeding_plan(cycle, template, default_feed_time)
+        _write_blind_feedings(plan, template, lambda day: DailyLog(cycle=cycle, date=day))
     db.add(cycle)
     await db.commit()
     await db.refresh(cycle)
@@ -259,6 +385,10 @@ async def update_cycle(
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     data = _cycle_payload(payload, exclude_unset=True)
+    recalculate = data.pop("recalculate_blind_feeding", False)
+    for key in ("start_date", "initial_population", "initial_abw_g"):
+        if key in data and data[key] is None:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{key} cannot be empty")
     next_status = data.get("status", cycle.status)
 
     # Closing a cycle must establish a durable end date. For a planned end in
@@ -273,8 +403,25 @@ async def update_cycle(
         elif next_status == "active" and cycle.status != "active":
             data["actual_end_date"] = None
 
+    # Only judge the dates this request sets, so an unrelated edit never trips over old data.
+    sent = payload.model_fields_set
+    start_date = data.get("start_date", cycle.start_date)
+    end_date = data.get("actual_end_date", cycle.actual_end_date)
+    if "start_date" in sent and next_status == "active" and start_date > farm_today():
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Start date cannot be in the future")
+    if sent & {"start_date", "actual_end_date"} and end_date is not None and start_date > end_date:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Start date cannot be after the cycle's end date")
+
+    anchor_feed_time = None
+    if data.get("blind_feeding_template_id") is not None or recalculate:
+        farm_id, anchor_feed_time = await _pond_farm_id_and_feed_time(db, cycle.pond_id)
+        await _get_cycle_template(db, data.get("blind_feeding_template_id"), farm_id)
+
+    old_start, old_template_id, old_target = cycle.start_date, cycle.blind_feeding_template_id, cycle.blind_feeding_target_abw_g
     for key, value in data.items():
         setattr(cycle, key, value)
+    if recalculate:
+        await _rewrite_blind_feeding(db, cycle, old_start, old_template_id, old_target, anchor_feed_time)
     await db.commit()
     await db.refresh(cycle)
     return cycle
