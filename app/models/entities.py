@@ -161,6 +161,8 @@ class DailyLog(Base):
     abw_g: Mapped[Decimal | None] = mapped_column(Numeric(10, 4))
     abw_sample_time: Mapped[time | None] = mapped_column(Time)
     notes: Mapped[str | None] = mapped_column(Text)
+    # Dead shrimp found that day. Tracked only: it never changes the population model.
+    mortality_count: Mapped[int | None] = mapped_column(Integer)
 
     cycle: Mapped[Cycle] = relationship(back_populates="daily_logs")
     feedings: Mapped[list["FeedingSession"]] = relationship(

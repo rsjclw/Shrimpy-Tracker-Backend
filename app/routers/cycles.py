@@ -339,6 +339,7 @@ async def _rewrite_blind_feeding(
             or_(*touched),
             DailyLog.abw_g.is_(None),
             DailyLog.notes.is_(None),
+            DailyLog.mortality_count.is_(None),
             ~exists().where(FeedingSession.daily_log_id == DailyLog.id),
             ~exists().where(WaterParameters.daily_log_id == DailyLog.id),
             ~exists().where(Treatment.daily_log_id == DailyLog.id),
@@ -552,7 +553,8 @@ async def upsert_cycle_day(
     user: CurrentUser = Depends(get_current_user),
 ) -> DayView:
     data = payload.model_dump(exclude_unset=True)
-    await require_cycle_permission(db, user, cycle_id, "add" if not data else "manage")
+    # Opening the day or logging dead shrimp is an operator's job; the ABW sample and notes stay maintainer-only.
+    await require_cycle_permission(db, user, cycle_id, "add" if set(data) <= {"mortality_count"} else "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     result = await db.execute(
         select(DailyLog).where(DailyLog.cycle_id == cycle_id, DailyLog.date == day)

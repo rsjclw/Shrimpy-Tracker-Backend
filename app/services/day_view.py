@@ -310,6 +310,7 @@ def _build_day_view(
             date=target,
             abw_g=None,
             abw_sample_time=None,
+            mortality_count=None,
             notes=None,
             sampling=sampling,
             default_feed_types=default_feed_types,
@@ -328,6 +329,7 @@ def _build_day_view(
         date=log.date,
         abw_g=log.abw_g,
         abw_sample_time=log.abw_sample_time,
+        mortality_count=log.mortality_count,
         notes=log.notes,
         sampling=sampling,
         default_feed_types=default_feed_types,
@@ -475,11 +477,37 @@ WATER_METRICS = (
     *BIOLOGY_COMPUTED_FIELDS,
 )
 
+# Dead shrimp per day and their running total, read straight from the day logs.
+# Tracked only: none of the population-based metrics look at them.
+MORTALITY_METRICS = ("mortality_count", "cumulative_mortality")
+
 # Everything /cycles/{id}/trends will plot. sample_fcr is computed per day from
 # the sampling card rather than from DayMetrics, so it is listed on its own.
 TREND_METRICS = frozenset(
-    {*METRIC_EXTRACTORS, *WATER_METRICS, *ENVIRONMENT_METRICS, "sample_fcr"}
+    {*METRIC_EXTRACTORS, *WATER_METRICS, *ENVIRONMENT_METRICS, *MORTALITY_METRICS, "sample_fcr"}
 )
+
+
+def mortality_series(
+    counts: dict[ddate, int], metric: str, date_from: ddate, date_to: ddate
+) -> list[tuple[ddate, Decimal | None]]:
+    """Daily dead-shrimp counts, or their running total from the first logged day
+    (None before it: nothing to add up yet, rather than a made-up zero)."""
+    running: int | None = None
+    for d in sorted(c for c in counts if c < date_from):
+        running = (running or 0) + counts[d]
+    points: list[tuple[ddate, Decimal | None]] = []
+    current = date_from
+    while current <= date_to:
+        if metric == "mortality_count":
+            value = counts.get(current)
+        else:
+            if current in counts:
+                running = (running or 0) + counts[current]
+            value = running
+        points.append((current, Decimal(value) if value is not None else None))
+        current = ddate.fromordinal(current.toordinal() + 1)
+    return points
 
 
 async def get_trend(
@@ -528,6 +556,16 @@ async def get_trend(
             points.append((current, values.get(current)))
             current = ddate.fromordinal(current.toordinal() + 1)
         return points
+
+    if metric in MORTALITY_METRICS:
+        result = await db.execute(
+            select(DailyLog.date, DailyLog.mortality_count).where(
+                DailyLog.cycle_id == cycle.id,
+                DailyLog.date <= date_to,
+                DailyLog.mortality_count.is_not(None),
+            )
+        )
+        return mortality_series(dict(result.all()), metric, date_from, date_to)
 
     feedings_all, samples, abw_history, harvests_all = await _gather(db, cycle)
 

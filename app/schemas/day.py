@@ -3,7 +3,7 @@ from datetime import date as ddate
 from datetime import time as dtime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.environment import DayEnvironmentOut
 from app.schemas.feeding import FeedingOut
@@ -17,6 +17,8 @@ class DailyLogUpdate(BaseModel):
     abw_g: Decimal | None = None
     abw_sample_time: dtime | None = None
     notes: str | None = None
+    # Dead shrimp found that day; null clears it. Tracked only, never changes population.
+    mortality_count: int | None = Field(default=None, ge=0)
 
 
 class DayMetrics(BaseModel):
@@ -81,6 +83,7 @@ class DayView(BaseModel):
     abw_g: Decimal | None
     abw_sample_time: dtime | None
     notes: str | None
+    mortality_count: int | None = None
     sampling: SamplingMetrics
     default_feed_types: list[FeedingFeedType]
     feedings: list[FeedingOut]
