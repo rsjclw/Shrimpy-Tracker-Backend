@@ -101,6 +101,12 @@ def harvested_count(harvests: list[HarvestRow], up_to: ddate) -> int:
     return sum(h.estimated_count for h in harvests if h.date <= up_to)
 
 
+def final_population(harvests: list[HarvestRow], end_date: ddate) -> int:
+    """Shrimp counted at the final harvest: the harvests on the cycle's last day, what the
+    pond held when it was emptied (partial harvests before it are not part of it)."""
+    return sum(h.estimated_count for h in harvests if h.date == end_date)
+
+
 def survival_rate_pct(initial_population: int, harvests: list[HarvestRow], up_to: ddate) -> Decimal | None:
     """Share of the stocked shrimp that were harvested: the cycle's survival rate once it has ended."""
     if initial_population <= 0:

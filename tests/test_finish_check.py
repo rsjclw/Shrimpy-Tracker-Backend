@@ -23,6 +23,7 @@ def _check(end=H, feeds=FEEDS, harvests=HARVESTS, abw=(FINAL_SAMPLE,)):
 def test_the_right_order_gives_survival_and_cycle_fcr_and_nothing_to_fix():
     c = _check()
     assert (c.harvested_count, c.survival_rate_pct, c.cycle_fcr) == (70_000, Decimal("70.0"), Decimal("0.71"))
+    assert c.final_population == 70_000
     assert (c.last_harvest_date, c.last_harvest_time) == (H, time(14, 30))
     assert c.harvests_after_end == 0
     assert c.feeds_after_final_harvest == []

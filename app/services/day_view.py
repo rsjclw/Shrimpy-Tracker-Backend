@@ -132,6 +132,7 @@ def _compute_metrics(
         fcr=fcr_value,
         harvested_count=M.harvested_count(harvests, target),
         survival_rate_pct=M.survival_rate_pct(cycle.initial_population, harvests, target) if ended else None,
+        final_population=M.final_population(harvests, end_date) if ended else None,
     )
 
 

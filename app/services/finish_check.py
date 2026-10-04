@@ -29,6 +29,8 @@ class FinishCheck:
     harvested_count: int
     harvested_kg: Decimal
     survival_rate_pct: Decimal | None
+    # Shrimp counted at the final harvest: the end day's harvests.
+    final_population: int
     feed_kg: Decimal
     cycle_fcr: Decimal | None
     # The cycle's last harvest, any day: usually the right end day.
@@ -76,6 +78,7 @@ def finish_check(
         harvested_count=M.harvested_count(harvests, end_date),
         harvested_kg=harvested_kg,
         survival_rate_pct=M.survival_rate_pct(stocked, harvests, end_date),
+        final_population=M.final_population(harvests, end_date),
         feed_kg=feed_kg,
         cycle_fcr=(feed_kg / harvested_kg).quantize(Decimal("0.01")) if harvested_kg > 0 else None,
         last_harvest_date=last.date if last else None,

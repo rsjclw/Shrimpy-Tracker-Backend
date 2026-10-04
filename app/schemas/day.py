@@ -36,6 +36,8 @@ class DayMetrics(BaseModel):
     harvested_count: int = 0
     # Harvested over stocked, %: only on and after an ended cycle's last day.
     survival_rate_pct: Decimal | None = None
+    # Shrimp counted at the final harvest (the last day's harvests): only on and after an ended cycle's last day.
+    final_population: int | None = None
 
 
 class LunarDayOut(BaseModel):

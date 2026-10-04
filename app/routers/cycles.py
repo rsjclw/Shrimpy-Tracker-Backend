@@ -113,6 +113,7 @@ class FinishCheckOut(BaseModel):
     harvested_count: int
     harvested_kg: Decimal
     survival_rate_pct: Decimal | None
+    final_population: int
     feed_kg: Decimal
     cycle_fcr: Decimal | None
     last_harvest_date: ddate | None

@@ -93,3 +93,11 @@ def test_a_sample_after_the_final_harvest_sees_the_empty_pond():
     s = _compute_sampling_metrics(END, FEEDINGS, [], ABW, [FINAL], _cycle())
     previous_biomass = M.estimated_biomass_kg(100_000, Decimal("10"))
     assert s.sample_fcr == M.gain_fcr(Decimal("600"), previous_biomass, Decimal("0"), Decimal("1200"))
+
+
+def test_final_population_is_the_last_days_harvest_not_the_partials():
+    partial = M.HarvestRow(date=date(2026, 8, 1), harvest_time=time(9, 0), biomass_kg=Decimal("200"), estimated_count=20_000)
+    m = _compute_metrics(_cycle(), END, FEEDINGS, [], ABW, [partial, FINAL])
+    assert m.final_population == 60_000
+    assert m.harvested_count == 80_000 and m.survival_rate_pct == Decimal("80.0")
+    assert _compute_metrics(_cycle(), date(2026, 8, 31), FEEDINGS, [], ABW, [partial, FINAL]).final_population is None
