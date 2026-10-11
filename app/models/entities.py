@@ -115,7 +115,7 @@ class Pond(Base):
     cycles: Mapped[list["Cycle"]] = relationship(back_populates="pond", cascade="all, delete-orphan")
 
 
-EQUIPMENT_KINDS = ("reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter")
+EQUIPMENT_KINDS = ("reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter", "blower")
 EQUIPMENT_EVENT_KINDS = (
     "broken", "sent_for_repair", "repaired", "serviced", "part_replaced", "disinfected", "note", "retired",
 )
@@ -127,7 +127,7 @@ def _in(column: str, values: tuple[str, ...]) -> str:
 
 class Equipment(Base):
     """Anything on a grid that isn't a pond: a reservoir, bore well, paddlewheel, pump,
-    generator or PLN meter.
+    generator, PLN meter or air blower (ring or roots, in specs.type).
 
     What it is lives here. Where it sits, what it moves water or power to, and what
     happened to it live in dated placements, links and events, so moving or fixing it

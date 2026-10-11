@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-EquipmentKind = Literal["reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter"]
+EquipmentKind = Literal["reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter", "blower"]
 EquipmentEventKind = Literal[
     "broken", "sent_for_repair", "repaired", "serviced", "part_replaced", "disinfected", "note", "retired"
 ]
@@ -22,7 +22,8 @@ class EquipmentFields(BaseModel):
     # The owner's label, e.g. "A0-K1"; unique per grid, renamable.
     code: str = Field(min_length=1, max_length=40)
     name: str | None = Field(default=None, max_length=100)
-    # Per kind, free-form: {"hp": 1, "wheels": 2}, {"kva": 15, "fuel": "diesel"}, {"width_m": 25, "length_m": 18}.
+    # Per kind, free-form: {"hp": 1, "wheels": 2}, {"kva": 15, "fuel": "diesel"}, {"width_m": 25, "length_m": 18},
+    # a blower's {"type": "ring" | "roots", "hp": 3}.
     specs: dict[str, Any] = Field(default_factory=dict)
     notes: str | None = None
 

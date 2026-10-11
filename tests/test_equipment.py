@@ -17,6 +17,7 @@ D = date(2026, 10, 1)
 def test_kinds_are_a_fixed_list_and_codes_are_trimmed():
     eq = EquipmentCreate(grid_id=GRID, kind="paddlewheel", code="  A0-K1 ", specs={"hp": 1})
     assert (eq.code, eq.specs) == ("A0-K1", {"hp": 1})
+    assert EquipmentCreate(grid_id=GRID, kind="blower", code="A0-B1", specs={"type": "ring", "hp": 3}).kind == "blower"
     with pytest.raises(ValidationError):
         EquipmentCreate(grid_id=GRID, kind="blender", code="X1")
     with pytest.raises(ValidationError):
