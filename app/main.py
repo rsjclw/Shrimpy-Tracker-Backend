@@ -7,21 +7,24 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.routers import additive_usage, auth, blind_feeding, cycles, days, equipment, farms, grids, inventory, ponds, products
-from app.services import weather_sync
+from app.services import feed_stock, weather_sync
 
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    task: asyncio.Task | None = None
+    tasks: list[asyncio.Task] = []
     if settings.weather_enabled:
-        task = asyncio.create_task(weather_sync.run_forever())
+        tasks.append(asyncio.create_task(weather_sync.run_forever()))
         logger.info("Weather sweep started (%s local)", settings.weather_sync_hours)
+    if settings.feed_stock_enabled:
+        tasks.append(asyncio.create_task(feed_stock.run_forever()))
+        logger.info("Feed stock sweep started (feedings from %s)", settings.feed_stock_from)
     try:
         yield
     finally:
-        if task is not None:
+        for task in tasks:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

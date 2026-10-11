@@ -1,3 +1,5 @@
+from datetime import date
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -12,6 +14,11 @@ class Settings(BaseSettings):
     default_timezone: str = "Asia/Jakarta"
     weather_enabled: bool = True
     weather_sync_hours: str = "5,17"
+    # Feedings take their feed and additives out of the pond's warehouse
+    # (services/feed_stock.py), from this day on. Earlier feedings were never
+    # counted against stock, so they stay out of it.
+    feed_stock_enabled: bool = True
+    feed_stock_from: date = date(2026, 10, 11)
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

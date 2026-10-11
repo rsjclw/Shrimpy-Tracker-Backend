@@ -14,6 +14,7 @@ from app.services.access import (
     require_pond_permission,
 )
 from app.services.common import apply_updates, get_or_404
+from app.services.feed_stock import sync_quietly
 
 router = APIRouter(prefix="/ponds", tags=["ponds"])
 
@@ -89,6 +90,8 @@ async def delete_pond(
     await require_pond_permission(db, user, pond_id, "manage")
     pond = await get_or_404(db, Pond, pond_id, "Pond not found")
     await db.delete(pond)
+    await db.flush()
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
 
 

@@ -33,6 +33,7 @@ from app.services.additives import resolve_additives
 from app.services.harvest_sample import resync_harvest_sample
 from app.services.clock import farm_today
 from app.services.common import apply_updates, get_or_404
+from app.services.feed_stock import sync_quietly
 from app.services.inventory import MovementError, consume_products, reverse_source
 from app.services.products import ProductError, expand, load_catalog
 
@@ -91,6 +92,8 @@ async def create_feeding(
         **data,
     )
     db.add(feeding)
+    await db.flush()
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     await db.refresh(feeding)
     return feeding
@@ -129,6 +132,9 @@ async def update_feeding(
         setattr(feeding, k, v)
     feeding.updated_by = updated_by
     feeding.updated_by_type = updated_by_type
+    await db.flush()
+    # Later feedings may follow this one's feed, so the sync looks at the whole cycle.
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     await db.refresh(feeding)
     return feeding
@@ -143,6 +149,9 @@ async def delete_feeding(
     await require_feeding_permission(db, user, feeding_id, "manage")
     feeding = await get_or_404(db, FeedingSession, feeding_id, "Feeding not found")
     await db.delete(feeding)
+    await db.flush()
+    # Gives back what it took, and settles the feedings that followed its feed.
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
 
 

@@ -21,6 +21,7 @@ from app.schemas.prediction import (
 from app.services import prediction_core as core
 from app.services.clock import farm_today
 from app.services.day_view import get_prediction_baseline
+from app.services.feed_stock import sync_quietly
 from app.services.feeding_amounts import round_feed_amount_kg
 from app.services.feeding_schedule import DEFAULT_FEED_TIME, feeding_sessions_for
 
@@ -570,6 +571,8 @@ async def apply_prediction_result(
         )
         harvests_created += 1
 
+    # Replaced feedings and treatments give back what they took; today's new ones take theirs.
+    await sync_quietly(db)
     await db.commit()
     counts = PredictionGeneratedCounts(
         days=len(preview.daily_rows),

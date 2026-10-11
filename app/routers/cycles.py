@@ -233,6 +233,7 @@ from app.services.blind_feeding import (
 )
 from app.services.clock import farm_today
 from app.services.common import get_or_404
+from app.services.feed_stock import sync_quietly
 from app.services.finish_check import FinishCheck, finish_check
 from app.services.metrics import RUNNING_STATUSES, cycle_end_date
 from app.services.feeding_amounts import round_feed_amount_kg
@@ -580,6 +581,7 @@ async def update_cycle(
         setattr(cycle, key, value)
     if recalculate:
         await _rewrite_blind_feeding(db, cycle, old_start, old_template_id, old_target, anchor_feed_time)
+        await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     await db.refresh(cycle)
     return cycle
@@ -622,6 +624,7 @@ async def stock_cycle(
     cycle.status = "active"
     if payload.blind_feeding_template_id is not None:
         await _rewrite_blind_feeding(db, cycle, planned_start, None, None, anchor_feed_time)
+        await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     await db.refresh(cycle)
     return cycle
@@ -710,6 +713,9 @@ async def delete_cycle(
     await require_cycle_permission(db, user, cycle_id, "manage")
     cycle = await get_or_404(db, Cycle, cycle_id, "Cycle not found")
     await db.delete(cycle)
+    await db.flush()
+    # Its feedings and treatments go with it, and so does the stock they had out.
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
 
 
@@ -1043,6 +1049,7 @@ async def batch_import_feedings_abw(
                 existing_by_time[incoming.feed_time] = feeding
                 feedings_created += 1
 
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     return BatchFeedingAbwImportOut(
         days=len(payload.days),

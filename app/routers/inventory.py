@@ -1,7 +1,7 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import func, select, update
+from sqlalchemy import func, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
@@ -23,6 +23,7 @@ from app.schemas import (
 )
 from app.services.access import require_farm_permission, require_grid_permission
 from app.services.common import apply_updates, get_or_404
+from app.services.feed_stock import sync_quietly
 from app.services.inventory import MovementError, apply_movement
 
 router = APIRouter(tags=["inventory"])
@@ -77,7 +78,9 @@ async def _ponds_by_warehouse(db: AsyncSession, grid_id: UUID) -> dict[UUID, lis
 def _warehouse_out(warehouse: Warehouse, ponds: dict[UUID, list[UUID]]) -> dict:
     data = {c.name: getattr(warehouse, c.name) for c in warehouse.__table__.columns}
     data["pond_ids"] = ponds.get(warehouse.id, [])
-    if hasattr(warehouse, "items"):
+    # Only when already loaded: hasattr() would lazy-load, which raises on the
+    # async session, so every route but the grid listing answered 500 after saving.
+    if "items" not in inspect(warehouse).unloaded:
         data["items"] = warehouse.items
     return data
 
@@ -189,6 +192,9 @@ async def set_warehouse_ponds(
         await db.execute(
             update(Pond).where(Pond.id.in_(payload.pond_ids)).values(warehouse_id=warehouse_id)
         )
+    # A pond that starts drawing from here takes its feed from here at once. What
+    # ponds already took stays where it was taken (see services/feed_stock.py).
+    await sync_quietly(db, actor=user.email or user.id)
     await db.commit()
     return _warehouse_out(warehouse, await _ponds_by_warehouse(db, warehouse.grid_id))
 
