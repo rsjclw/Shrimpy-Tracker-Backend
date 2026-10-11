@@ -100,6 +100,9 @@ class Pond(Base):
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     area_m2: Mapped[Decimal | None] = mapped_column(Numeric(10, 2))
+    # Metres, west-east and north-south. When both are set, area_m2 is their product.
+    width_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    length_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
     default_feed_time: Mapped[time] = mapped_column(Time, nullable=False, default=time(6, 0))
     # Where feed and treatments on this pond come out of. Null: nothing is deducted.
     warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
