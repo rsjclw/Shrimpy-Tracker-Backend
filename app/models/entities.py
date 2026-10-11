@@ -115,40 +115,140 @@ class Pond(Base):
     cycles: Mapped[list["Cycle"]] = relationship(back_populates="pond", cascade="all, delete-orphan")
 
 
-PLACE_KINDS = ("reservoir", "bore_well")
+EQUIPMENT_KINDS = ("reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter")
+EQUIPMENT_EVENT_KINDS = (
+    "broken", "sent_for_repair", "repaired", "serviced", "part_replaced", "disinfected", "note", "retired",
+)
 
 
-class Place(Base):
-    """A reservoir or bore well on a grid: water the farm's machines work in or draw from.
+def _in(column: str, values: tuple[str, ...]) -> str:
+    return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
-    Kept apart from ponds on purpose. A pond's daily records hang off its cycles,
-    which a place never has, and a place must not show up in pond lists.
+
+class Equipment(Base):
+    """Anything on a grid that isn't a pond: a reservoir, bore well, paddlewheel, pump,
+    generator or PLN meter.
+
+    What it is lives here. Where it sits, what it moves water or power to, and what
+    happened to it live in dated placements, links and events, so moving or fixing it
+    never rewrites the past. Ponds stay their own table (they have cycles); counted
+    spare parts stay in inventory.
     """
 
-    __tablename__ = "places"
+    __tablename__ = "equipment"
 
     id: Mapped[uuid.UUID] = _uuid_pk()
     grid_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("grids.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # reservoir | bore_well
-    name: Mapped[str] = mapped_column(String(100), nullable=False)
-    # Metres, west-east and north-south, like a pond's. A bore well has no size.
-    width_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
-    length_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    # The owner's label, e.g. "A0-K1". Renamable: history follows the row, not the code.
+    code: Mapped[str] = mapped_column(String(40), nullable=False)
+    name: Mapped[str | None] = mapped_column(String(100))
+    # Per kind: hp, wheels, kva, fuel, pipe, a reservoir's width_m / length_m, ...
+    specs: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     __table_args__ = (
-        UniqueConstraint("grid_id", "name", name="uq_places_grid_name"),
-        CheckConstraint(f"kind IN {PLACE_KINDS}", name="ck_places_kind"),
+        UniqueConstraint("grid_id", "code", name="uq_equipment_grid_code"),
+        CheckConstraint(_in("kind", EQUIPMENT_KINDS), name="ck_equipment_kind"),
     )
 
-    @property
-    def area_m2(self) -> Decimal | None:
-        if self.width_m is None or self.length_m is None:
-            return None
-        return (self.width_m * self.length_m).quantize(Decimal("0.01"))
+
+class EquipmentPlacement(Base):
+    """Where a piece of equipment sits, from a date until the next placement.
+
+    In at most one of a pond, a reservoir (`in_equipment_id`) or a warehouse; in none
+    of them it stands on the grid itself. x_m / y_m are metres from the west and north
+    edges of whatever it is in (or of the grid). bearing is the way a paddlewheel
+    pushes water, 0-359 with 0 north.
+    """
+
+    __tablename__ = "equipment_placements"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    equipment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    pond_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ponds.id", ondelete="CASCADE"))
+    in_equipment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE")
+    )
+    warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("warehouses.id", ondelete="CASCADE")
+    )
+    x_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    y_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    bearing: Mapped[int | None] = mapped_column(Integer)
+    from_date: Mapped[date] = mapped_column(Date, nullable=False)
+    to_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("num_nonnulls(pond_id, in_equipment_id, warehouse_id) <= 1", name="ck_equipment_placements_one_place"),
+        CheckConstraint("bearing IS NULL OR (bearing >= 0 AND bearing <= 359)", name="ck_equipment_placements_bearing"),
+        CheckConstraint("to_date IS NULL OR to_date >= from_date", name="ck_equipment_placements_dates"),
+    )
+
+
+class EquipmentLink(Base):
+    """What a piece of equipment moves water or power from and to, one pair per row, dated.
+
+    A pump: from a bore well to a reservoir. A generator or PLN meter: from nothing to a
+    pond. A paddlewheel has none; it only moves the water it sits in.
+    """
+
+    __tablename__ = "equipment_links"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    equipment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    from_pond_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ponds.id", ondelete="CASCADE"))
+    from_equipment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE")
+    )
+    to_pond_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("ponds.id", ondelete="CASCADE"))
+    to_equipment_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE")
+    )
+    from_date: Mapped[date | None] = mapped_column(Date)  # unknown for things that were there before records
+    to_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint("num_nonnulls(from_pond_id, from_equipment_id) <= 1", name="ck_equipment_links_one_from"),
+        CheckConstraint("num_nonnulls(to_pond_id, to_equipment_id) = 1", name="ck_equipment_links_one_to"),
+        CheckConstraint("to_date IS NULL OR from_date IS NULL OR to_date >= from_date", name="ck_equipment_links_dates"),
+    )
+
+
+class EquipmentEvent(Base):
+    """Something that happened to a piece of equipment. Its status comes only from these,
+    the way stock only changes through movements: broken, sent for repair, repaired,
+    retired. A reservoir's disinfections are events too."""
+
+    __tablename__ = "equipment_events"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    equipment_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("equipment.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    date: Mapped[date] = mapped_column(Date, nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text)
+    cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 2))
+    run_hours: Mapped[Decimal | None] = mapped_column(Numeric(10, 1))  # a generator's hour meter
+    created_by: Mapped[str | None] = mapped_column(String(255))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        CheckConstraint(_in("kind", EQUIPMENT_EVENT_KINDS), name="ck_equipment_events_kind"),
+        CheckConstraint("cost IS NULL OR cost >= 0", name="ck_equipment_events_cost"),
+    )
 
 
 class Cycle(Base):
