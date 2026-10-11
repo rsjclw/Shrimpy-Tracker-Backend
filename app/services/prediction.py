@@ -542,7 +542,11 @@ async def apply_prediction_result(
                     feed_time=feeding.feed_time,
                     amount_kg=feeding.amount_kg,
                     additives=[],
-                    feed_types=[item.model_dump(mode="json") for item in feeding.feed_types],
+                    # No feed of its own: the forecast's pick (its feed plan by ABW) is not
+                    # what the pond will be fed. A feeding without one shows the latest
+                    # feed recorded on or before its day (DayView.default_feed_types), so
+                    # the plan follows the pond's current feed until a change is reported.
+                    feed_types=[],
                     notes="Predicted feeding",
                 )
             )

@@ -427,3 +427,55 @@ async def test_apply_prediction_anchors_partial_harvest_abw_and_final_harvest():
     assert final_harvest.biomass_kg == Decimal("500")
     assert final_harvest.sampled_abw_g == Decimal("10.0000")
     assert result.generated.feedings_created == 0
+
+
+@pytest.mark.asyncio
+async def test_apply_prediction_writes_feedings_without_a_feed_type():
+    """The forecast's feed pick stays in the preview; applied feedings carry none, so they
+    show the pond's latest recorded feed instead of switching it on their own."""
+    from app.models import FeedingSession
+    from app.schemas.feeding import FeedingFeedType
+    from app.schemas.prediction import PredictionFeedingOut
+
+    start = date(2026, 5, 10)
+    row = _prediction_daily_row(start, 10, "8.0000", "8.5000")
+    row.feedings = [
+        PredictionFeedingOut(
+            feed_time=time(6, 0),
+            amount_kg=Decimal("5.0"),
+            feed_types=[FeedingFeedType(product_id="p", name="Haida HDV-D", percentage=Decimal("100"))],
+        )
+    ]
+    preview = PredictionResultOut(
+        summary=PredictionSummaryOut(
+            initial_abw_g=Decimal("8.0000"),
+            final_doc=10,
+            final_date=start,
+            final_abw_g=Decimal("8.5000"),
+            final_biomass_kg=Decimal("0"),
+            total_harvested_biomass_kg=Decimal("0"),
+            cumulative_feed_kg=Decimal("5"),
+            simulated_feed_kg=Decimal("5"),
+            final_revenue=Decimal("0"),
+            partial_revenue=Decimal("0"),
+            total_revenue=Decimal("0"),
+            feed_cost=Decimal("0"),
+            total_costs=Decimal("0"),
+            profit=Decimal("0"),
+            profit_per_day=Decimal("0"),
+            harvest_count_size=Decimal("100"),
+            harvest_price_per_kg=Decimal("0"),
+            stop_reason="final_doc",
+        ),
+        daily_rows=[row],
+        partial_harvests=[],
+        generated=None,
+    )
+
+    db = _ApplyPredictionDb([])
+    result = await prediction.apply_prediction_result(db, SimpleNamespace(id=uuid4()), preview)
+
+    feedings = [item for item in db.added if isinstance(item, FeedingSession)]
+    assert result.generated.feedings_created == 1
+    assert [f.feed_types for f in feedings] == [[]]
+    assert preview.daily_rows[0].feedings[0].feed_types[0].name == "Haida HDV-D"
