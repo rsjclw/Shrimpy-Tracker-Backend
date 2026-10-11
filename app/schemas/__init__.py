@@ -43,6 +43,7 @@ from app.schemas.farm import (
 )
 from app.schemas.grid import GridCreate, GridOut, GridUpdate
 from app.schemas.harvest import HarvestCreate, HarvestOut, HarvestUpdate
+from app.schemas.place import PlaceCreate, PlaceOut, PlaceUpdate
 from app.schemas.pond import PondCreate, PondOut, PondUpdate
 from app.schemas.prediction import (
     PredictionGeneratedCounts,
@@ -110,6 +111,9 @@ __all__ = [
     "PondCreate",
     "PondUpdate",
     "PondOut",
+    "PlaceCreate",
+    "PlaceUpdate",
+    "PlaceOut",
     "CycleCreate",
     "CycleOut",
     "PredictionConfig",

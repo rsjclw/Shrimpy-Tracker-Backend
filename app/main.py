@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
-from app.routers import additive_usage, auth, blind_feeding, cycles, days, farms, grids, inventory, ponds, products
+from app.routers import additive_usage, auth, blind_feeding, cycles, days, farms, grids, inventory, places, ponds, products
 from app.services import weather_sync
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,7 @@ app.include_router(auth.router)
 app.include_router(grids.router)
 app.include_router(farms.router)
 app.include_router(ponds.router)
+app.include_router(places.router)
 app.include_router(cycles.router)
 app.include_router(days.router)
 app.include_router(additive_usage.router)

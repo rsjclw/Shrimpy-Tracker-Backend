@@ -4,6 +4,7 @@ from decimal import Decimal
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     Date,
     DateTime,
     ForeignKey,
@@ -112,6 +113,42 @@ class Pond(Base):
 
     grid: Mapped[Grid] = relationship(back_populates="ponds")
     cycles: Mapped[list["Cycle"]] = relationship(back_populates="pond", cascade="all, delete-orphan")
+
+
+PLACE_KINDS = ("reservoir", "bore_well")
+
+
+class Place(Base):
+    """A reservoir or bore well on a grid: water the farm's machines work in or draw from.
+
+    Kept apart from ponds on purpose. A pond's daily records hang off its cycles,
+    which a place never has, and a place must not show up in pond lists.
+    """
+
+    __tablename__ = "places"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    grid_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("grids.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)  # reservoir | bore_well
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Metres, west-east and north-south, like a pond's. A bore well has no size.
+    width_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    length_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    notes: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    __table_args__ = (
+        UniqueConstraint("grid_id", "name", name="uq_places_grid_name"),
+        CheckConstraint(f"kind IN {PLACE_KINDS}", name="ck_places_kind"),
+    )
+
+    @property
+    def area_m2(self) -> Decimal | None:
+        if self.width_m is None or self.length_m is None:
+            return None
+        return (self.width_m * self.length_m).quantize(Decimal("0.01"))
 
 
 class Cycle(Base):
