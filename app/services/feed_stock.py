@@ -6,13 +6,14 @@ delete them in bulk, so moving stock route by route would miss some. Instead
 `sync` reconciles: it works out what every feeding should have taken, compares
 that with what the ledger says it took (the movements tagged with it), and writes
 only the difference. A second run writes nothing. Feeding writes call it, and a
-sweep runs it every few minutes, which is also how a forecast feeding starts
-counting once its day comes.
+sweep runs it every few minutes, which is also how a planned feeding starts
+counting once its feed time comes.
 
 What a feeding takes:
-- nothing dated before `settings.feed_stock_from`, nor before its day has come on
-  the farm's clock: a forecast writes days ahead, and those are plans. Nor after
-  an ended cycle's last day, where leftover forecast rows feed an empty pond;
+- nothing dated before `settings.feed_stock_from`, nor before its feed time has
+  come on the farm's clock: the day's feeds are written ahead (the morning plan,
+  a forecast days out), and until their time they are plans. Nor after an ended
+  cycle's last day, where leftover forecast rows feed an empty pond;
 - its feed by the mix it was fed: its own `feed_types`, else the feed of the
   feeding before it in the cycle, else the farm's first feed product - the rule
   the dashboard shows, so stock moves by what the screen says was fed;
@@ -33,11 +34,15 @@ import asyncio
 import logging
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import date as ddate
+from datetime import datetime
+from datetime import time as dtime
 from decimal import ROUND_HALF_UP, Decimal
 from itertools import groupby
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, func, select, text
+from sqlalchemy import exists, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -55,8 +60,8 @@ from app.models import (
 )
 from app.schemas.units import base_units_per_dose_unit, dose_unit_for
 from app.services.additives import entry_dose
-from app.services.clock import farm_today
-from app.services.inventory import apply_movement, reverse_source
+from app.services.clock import farm_now
+from app.services.inventory import apply_movement
 from app.services.metrics import cycle_end_date
 from app.services.products import Catalog, ProductError, expand, load_catalog
 
@@ -177,10 +182,56 @@ def wanted(
 
 def unchanged(taken: list[Taken], want: dict[UUID, Decimal]) -> bool:
     """Whether a feeding already has out exactly what it should, wherever it came from."""
+    return _by_product(taken) == want
+
+
+def _by_product(taken: list[Taken]) -> dict[UUID, Decimal]:
     have: dict[UUID, Decimal] = defaultdict(Decimal)
     for t in taken:
         have[t.product_id] += t.amount
-    return {pid: qty for pid, qty in have.items() if qty} == want
+    return {pid: qty for pid, qty in have.items() if qty}
+
+
+def settled_by_count(
+    taken: list[Taken],
+    want: dict[UUID, Decimal],
+    fed_at: datetime,
+    counted_at: dict[UUID, datetime],
+    pond_rows: dict[UUID, UUID],
+) -> set[UUID]:
+    """Products whose stock a count taken after this feeding already settled.
+
+    A stock count is what was on the shelf when it was taken, so a feed given
+    before it is in it, recorded right or not. From then on that product no
+    longer moves for this feeding, whatever is edited on it. `pond_rows` is
+    {product: its stock row in the pond's warehouse}.
+    """
+    held = {t.product_id for t in taken if (c := counted_at.get(t.item_id)) is not None and c > fed_at}
+    for pid in want:
+        row = pond_rows.get(pid)
+        if row is not None and (c := counted_at.get(row)) is not None and c > fed_at:
+            held.add(pid)
+    return held
+
+
+def goal(taken: list[Taken], want: dict[UUID, Decimal], held: set[UUID]) -> dict[UUID, Decimal]:
+    """What a feeding should have out per product: what it wants, except held products stay as they are."""
+    have = _by_product(taken)
+    out = {pid: qty for pid, qty in want.items() if pid not in held}
+    out.update({pid: have[pid] for pid in held if pid in have})
+    return out
+
+
+def targets(
+    taken: list[Taken], want: dict[UUID, Decimal], held: set[UUID], pond_rows: dict[UUID, UUID]
+) -> dict[UUID, Decimal]:
+    """{stock row: what this feeding should have out of it}. Held products keep their rows; the
+    rest come out of the pond's warehouse, so rows elsewhere go back to nothing."""
+    target = {t.item_id: t.amount for t in taken if t.product_id in held}
+    for pid, qty in want.items():
+        if pid not in held:
+            target[pond_rows[pid]] = qty
+    return target
 
 
 def differences(taken: dict[UUID, Decimal], target: dict[UUID, Decimal]) -> dict[UUID, Decimal]:
@@ -191,6 +242,11 @@ def differences(taken: dict[UUID, Decimal], target: dict[UUID, Decimal]) -> dict
         if diff:
             out[item_id] = diff
     return out
+
+
+def counts(day: ddate, feed_time: dtime, start: ddate, end: ddate | None, now: datetime) -> bool:
+    """Whether a feeding takes stock yet: from `start`, once its feed time has come, up to the cycle's end."""
+    return start <= day and datetime.combine(day, feed_time) <= now and (end is None or day <= end)
 
 
 def first_feed(catalog: Catalog) -> list[dict]:
@@ -210,30 +266,76 @@ def _label(pond_name: str, day, feed_time) -> str:
     return f"{pond_name} {day.day} {day:%b} {feed_time:%H:%M}"
 
 
+def _last_counts():
+    """Each stock row's latest count. Movements before it are inside the counted amount."""
+    return (
+        select(InventoryMovement.item_id.label("item_id"), func.max(InventoryMovement.created_at).label("at"))
+        .where(InventoryMovement.kind == "count")
+        .group_by(InventoryMovement.item_id)
+        .subquery()
+    )
+
+
+async def _lock(db: AsyncSession, item_ids: set[UUID]) -> dict[UUID, InventoryItem]:
+    """Stock rows locked in id order, as everything else that moves stock does, so nothing deadlocks."""
+    result = await db.execute(
+        select(InventoryItem)
+        .where(InventoryItem.id.in_(item_ids))
+        .order_by(InventoryItem.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    return {item.id: item for item in result.scalars()}
+
+
+def _move(db: AsyncSession, item: InventoryItem, amount: Decimal, **fields) -> None:
+    """Take `amount` out of a row (negative puts it back) and record it."""
+    kind = "use" if amount > 0 else "receive"
+    delta, new = apply_movement(item.quantity, kind, abs(amount))
+    item.quantity = new
+    # The time of the write, not of the transaction: it is compared with stock
+    # counts, and this may run in a transaction that began before one was taken.
+    db.add(
+        InventoryMovement(
+            item_id=item.id, kind=kind, delta=delta, quantity_after=new, created_at=func.clock_timestamp(), **fields
+        )
+    )
+
+
 async def _give_back_orphans(db: AsyncSession, actor: str | None) -> int:
-    """Put back what deleted feedings and treatments still have out. Returns how many."""
-    count = 0
+    """Put back what deleted feedings and treatments still have out since each row's last count.
+    Returns how many."""
+    last = _last_counts()
+    moves = []
     for source_type, model, note in (
         (SOURCE, FeedingSession, "Feeding deleted"),
         ("treatment", Treatment, "Treatment deleted"),
     ):
         result = await db.execute(
-            select(InventoryMovement.source_id)
+            select(InventoryMovement.source_id, InventoryMovement.item_id, func.sum(InventoryMovement.delta))
+            .outerjoin(last, last.c.item_id == InventoryMovement.item_id)
             .where(
                 InventoryMovement.source_type == source_type,
                 InventoryMovement.source_id.is_not(None),
                 ~exists().where(model.id == InventoryMovement.source_id),
+                or_(last.c.at.is_(None), InventoryMovement.created_at > last.c.at),
             )
             .group_by(InventoryMovement.source_id, InventoryMovement.item_id)
             .having(func.sum(InventoryMovement.delta) != 0)
         )
-        for source_id in sorted({row[0] for row in result.all()}):
-            await reverse_source(db, source_type, source_id, note=note, created_by=actor)
-            count += 1
-    return count
+        moves += [(source_type, source_id, item_id, net, note) for source_id, item_id, net in result.all()]
+    if not moves:
+        return 0
+    stock = await _lock(db, {item_id for _t, _s, item_id, _n, _note in moves})
+    for source_type, source_id, item_id, net, note in sorted(moves, key=lambda m: (m[2], m[1])):
+        # A negative net is stock still out, so putting it back is a negative take.
+        _move(db, stock[item_id], net, note=note, source_type=source_type, source_id=source_id, created_by=actor)
+    return len({(m[0], m[1]) for m in moves})
 
 
 async def _taken(db: AsyncSession) -> dict[UUID, list[Taken]]:
+    """What each feeding has out, per stock row, since that row was last counted."""
+    last = _last_counts()
     result = await db.execute(
         select(
             InventoryMovement.source_id,
@@ -242,7 +344,11 @@ async def _taken(db: AsyncSession) -> dict[UUID, list[Taken]]:
             func.sum(InventoryMovement.delta),
         )
         .join(InventoryItem, InventoryItem.id == InventoryMovement.item_id)
-        .where(InventoryMovement.source_type == SOURCE)
+        .outerjoin(last, last.c.item_id == InventoryMovement.item_id)
+        .where(
+            InventoryMovement.source_type == SOURCE,
+            or_(last.c.at.is_(None), InventoryMovement.created_at > last.c.at),
+        )
         .group_by(InventoryMovement.source_id, InventoryMovement.item_id, InventoryItem.product_id)
     )
     taken: dict[UUID, list[Taken]] = defaultdict(list)
@@ -260,7 +366,8 @@ async def sync(db: AsyncSession, *, actor: str | None = None) -> int:
     await db.execute(text(f"SELECT pg_advisory_xact_lock({_LOCK_KEY})"))
     settled = await _give_back_orphans(db, actor)
 
-    start, today = settings.feed_stock_from, farm_today()
+    start, now = settings.feed_stock_from, farm_now()
+    today = now.date()
     if start > today:
         return settled
     # Whole cycles, back to their first feeding: a feeding in the window may be
@@ -302,8 +409,18 @@ async def sync(db: AsyncSession, *, actor: str | None = None) -> int:
         return settled
 
     taken = await _taken(db)
+    counted = await db.execute(select(_last_counts()))
+    counted_at: dict[UUID, datetime] = dict(counted.all())
+    found = await db.execute(
+        select(InventoryItem.warehouse_id, InventoryItem.product_id, InventoryItem.id).where(
+            InventoryItem.warehouse_id.in_({r.warehouse_id for r in rows if r.warehouse_id is not None})
+        )
+    )
+    items: dict[tuple[UUID, UUID], UUID] = {(w, p): item_id for w, p, item_id in found.all()}
+    zone = ZoneInfo(settings.default_timezone)
+
     catalogs: dict[UUID, tuple[Catalog, dict[str, Product], list[dict]]] = {}
-    pending = []  # (row, what it has out, what it should have out)
+    pending = []  # (row, what it has out, what it wants, products a count has settled)
     for _cycle_id, group in groupby(rows, key=lambda r: r.cycle_id):
         group = list(group)
         farm_id = group[0].farm_id
@@ -317,72 +434,58 @@ async def sync(db: AsyncSession, *, actor: str | None = None) -> int:
         for row, mix in zip(group, carried_mixes([r.feed_types or [] for r in group], fallback)):
             if row.warehouse_id is None:
                 continue
-            counts = row.date >= start and (end is None or row.date <= end)
             try:
-                want = wanted(catalog, by_name, Decimal(row.amount_kg), mix, row.additives or []) if counts else {}
+                want = (
+                    wanted(catalog, by_name, Decimal(row.amount_kg), mix, row.additives or [])
+                    if counts(row.date, row.feed_time, start, end, now)
+                    else {}
+                )
             except ProductError as exc:
                 logger.warning("Feeding %s moves no stock: %s", row.id, exc)
                 continue
             have = taken.get(row.id, [])
-            if not unchanged(have, want):
-                pending.append((row, have, want))
+            pond_rows = {pid: items[(row.warehouse_id, pid)] for pid in want if (row.warehouse_id, pid) in items}
+            fed_at = datetime.combine(row.date, row.feed_time, tzinfo=zone)
+            held = settled_by_count(have, want, fed_at, counted_at, pond_rows)
+            if not unchanged(have, goal(have, want, held)):
+                pending.append((row, have, want, held))
     if not pending:
         return settled
 
-    # The stock rows each changed feeding settles against, made where missing.
-    needed = {(row.warehouse_id, pid) for row, _have, want in pending for pid in want}
-    items: dict[tuple[UUID, UUID], UUID] = {}
-    if needed:
-        found = await db.execute(
-            select(InventoryItem.warehouse_id, InventoryItem.product_id, InventoryItem.id).where(
-                InventoryItem.warehouse_id.in_({w for w, _p in needed}),
-                InventoryItem.product_id.in_({p for _w, p in needed}),
-            )
-        )
-        items = {(w, p): item_id for w, p, item_id in found.all()}
-        made = [
-            InventoryItem(warehouse_id=warehouse_id, product_id=product_id, quantity=Decimal("0"))
-            for warehouse_id, product_id in sorted(needed - items.keys())
-        ]
-        if made:
-            db.add_all(made)
-            await db.flush()  # the ids come from the insert
-            items.update({(item.warehouse_id, item.product_id): item.id for item in made})
+    # A warehouse with no stock row for a product it is now giving out gets one at 0.
+    missing = sorted(
+        {(row.warehouse_id, pid) for row, _have, want, held in pending for pid in want if pid not in held}
+        - items.keys()
+    )
+    if missing:
+        made = [InventoryItem(warehouse_id=w, product_id=p, quantity=Decimal("0")) for w, p in missing]
+        db.add_all(made)
+        await db.flush()  # the ids come from the insert
+        items.update({(item.warehouse_id, item.product_id): item.id for item in made})
 
     plans = []
-    for row, have, want in pending:
-        target = {items[(row.warehouse_id, pid)]: qty for pid, qty in want.items()}
-        diffs = differences({t.item_id: t.amount for t in have}, target)
-        prefix = "Feeding changed" if have else "Feeding"
+    for row, have, want, held in pending:
+        pond_rows = {pid: items[(row.warehouse_id, pid)] for pid in want if pid not in held}
+        diffs = differences({t.item_id: t.amount for t in have}, targets(have, want, held, pond_rows))
+        if not have:
+            prefix = "Feeding"
+        elif datetime.combine(row.date, row.feed_time) > now:
+            prefix = "Feeding not due yet"  # its time was moved later, or it was taken early
+        else:
+            prefix = "Feeding changed"
         plans.append((row, f"{prefix} {_label(row.name, row.date, row.feed_time)}", diffs))
 
-    # Locked in id order, as everything else that moves stock does, so nothing deadlocks.
-    locked = await db.execute(
-        select(InventoryItem)
-        .where(InventoryItem.id.in_({item_id for _r, _n, diffs in plans for item_id in diffs}))
-        .order_by(InventoryItem.id)
-        .with_for_update()
-        .execution_options(populate_existing=True)
-    )
-    stock = {item.id: item for item in locked.scalars()}
+    stock = await _lock(db, {item_id for _r, _n, diffs in plans for item_id in diffs})
     for row, note, diffs in plans:
         for item_id in sorted(diffs):
-            diff = diffs[item_id]
-            item = stock[item_id]
-            kind = "use" if diff > 0 else "receive"
-            delta, new = apply_movement(item.quantity, kind, abs(diff))
-            item.quantity = new
-            db.add(
-                InventoryMovement(
-                    item_id=item_id,
-                    kind=kind,
-                    delta=delta,
-                    quantity_after=new,
-                    note=note,
-                    source_type=SOURCE,
-                    source_id=row.id,
-                    created_by=row.updated_by or actor,
-                )
+            _move(
+                db,
+                stock[item_id],
+                diffs[item_id],
+                note=note,
+                source_type=SOURCE,
+                source_id=row.id,
+                created_by=row.updated_by or actor,
             )
     await db.flush()
     return settled + len(plans)

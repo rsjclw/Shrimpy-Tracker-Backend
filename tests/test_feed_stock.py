@@ -1,5 +1,5 @@
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -8,7 +8,11 @@ from app.models import Product, ProductComponent, ProductUnit
 from app.services.feed_stock import (
     Taken,
     carried_mixes,
+    counts,
     differences,
+    goal,
+    settled_by_count,
+    targets,
     entry_product,
     first_feed,
     unchanged,
@@ -203,3 +207,70 @@ def test_differences_take_only_what_changed():
     target = {a: Decimal("8"), b: Decimal("2")}
     assert differences(taken, target) == {a: Decimal("-2"), b: Decimal("2"), c: Decimal("-3")}
     assert differences(target, target) == {}
+
+
+# --- when a feeding starts taking stock -------------------------------------
+
+_START = date(2026, 10, 11)
+
+
+def test_a_planned_feeding_takes_stock_only_once_its_time_comes():
+    """Early on the 12th the day's 10:00 feed is still a plan, so its feed is still in the warehouse."""
+    morning = datetime(2026, 10, 12, 6, 24)
+    assert counts(date(2026, 10, 12), time(6, 0), _START, None, morning)
+    assert not counts(date(2026, 10, 12), time(10, 0), _START, None, morning)
+    assert counts(date(2026, 10, 12), time(10, 0), _START, None, datetime(2026, 10, 12, 10, 0))
+    assert counts(date(2026, 10, 11), time(18, 0), _START, None, morning)
+    assert not counts(date(2026, 10, 13), time(6, 0), _START, None, morning)
+
+
+def test_nothing_before_the_start_or_after_the_cycle_ended_takes_stock():
+    later = datetime(2026, 12, 1, 12, 0)
+    assert not counts(date(2026, 10, 10), time(6, 0), _START, None, later)
+    assert counts(date(2026, 11, 1), time(6, 0), _START, date(2026, 11, 1), later)
+    assert not counts(date(2026, 11, 2), time(6, 0), _START, date(2026, 11, 1), later)
+
+
+# --- stock counts -------------------------------------------------------------
+
+_WIB = timezone(timedelta(hours=7))
+
+
+def test_a_count_after_a_feed_settles_it_for_good():
+    """Counted at 06:23: the 06:00 feed is in the count, so editing it later moves nothing."""
+    c2l, row = uuid.uuid4(), uuid.uuid4()
+    counted_at = {row: datetime(2026, 10, 12, 6, 23, tzinfo=_WIB)}
+    six = datetime(2026, 10, 12, 6, 0, tzinfo=_WIB)
+    ten = datetime(2026, 10, 12, 10, 0, tzinfo=_WIB)
+    assert settled_by_count([], {c2l: Decimal("20")}, six, counted_at, {c2l: row}) == {c2l}
+    assert settled_by_count([], {c2l: Decimal("22.1")}, ten, counted_at, {c2l: row}) == set()
+    assert settled_by_count([], {c2l: Decimal("20")}, six, {}, {c2l: row}) == set()
+
+
+def test_a_held_product_keeps_what_it_has_while_the_rest_settle():
+    c2l, ab, c2l_row, ab_row = uuid.uuid4(), uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    # Since the count it has nothing out of C2L; AB was never counted.
+    have = [Taken(ab_row, ab, Decimal("0.019"))]
+    want = {c2l: Decimal("20"), ab: Decimal("0.020")}
+    assert goal(have, want, {c2l}) == {ab: Decimal("0.020")}
+    assert targets(have, want, {c2l}, {ab: ab_row}) == {ab_row: Decimal("0.020")}
+
+
+def test_a_feed_taken_early_and_then_counted_is_taken_again_at_its_time():
+    """The 10:00 feed went out at midnight by mistake, then C2L was counted at 06:23. Its
+    midnight take is inside the count (so not in `have`), and at 10:00 it is taken for real."""
+    c2l, row = uuid.uuid4(), uuid.uuid4()
+    want = {c2l: Decimal("22.1")}
+    assert goal([], want, set()) == want
+    assert targets([], want, set(), {c2l: row}) == {row: Decimal("22.1")}
+    assert goal([], {}, set()) == {}  # before 10:00 it wants nothing and has nothing: no change
+
+
+def test_a_pond_moved_to_another_warehouse_settles_there_once_it_changes():
+    c2l, old_row, new_row = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    have = [Taken(old_row, c2l, Decimal("10"))]
+    assert targets(have, {c2l: Decimal("12")}, set(), {c2l: new_row}) == {new_row: Decimal("12")}
+    assert differences({old_row: Decimal("10")}, {new_row: Decimal("12")}) == {
+        old_row: Decimal("-10"),
+        new_row: Decimal("12"),
+    }

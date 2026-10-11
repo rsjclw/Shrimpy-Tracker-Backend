@@ -346,6 +346,9 @@ async def add_movement(
             quantity_after=new,
             note=(payload.note or "").strip() or None,
             created_by=user.email or user.id,
+            # When it was written, under the row lock: feedings settle against the
+            # latest count by this time (services/feed_stock.py).
+            created_at=func.clock_timestamp(),
         )
     )
     await db.commit()
