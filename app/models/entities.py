@@ -104,6 +104,11 @@ class Pond(Base):
     # Metres, west-east and north-south. When both are set, area_m2 is their product.
     width_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
     length_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    # On the grid's layout drawing: the pond's middle, metres east and south of the
+    # drawing's origin (null: not drawn yet), and how far it is turned clockwise.
+    x_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    y_m: Mapped[Decimal | None] = mapped_column(Numeric(8, 2))
+    rotation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     default_feed_time: Mapped[time] = mapped_column(Time, nullable=False, default=time(6, 0))
     # Where feed and treatments on this pond come out of. Null: nothing is deducted.
     warehouse_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -113,6 +118,11 @@ class Pond(Base):
 
     grid: Mapped[Grid] = relationship(back_populates="ponds")
     cycles: Mapped[list["Cycle"]] = relationship(back_populates="pond", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint("(x_m IS NULL) = (y_m IS NULL)", name="ck_ponds_layout_xy"),
+        CheckConstraint("rotation >= 0 AND rotation <= 359", name="ck_ponds_rotation"),
+    )
 
 
 EQUIPMENT_KINDS = ("reservoir", "bore_well", "paddlewheel", "pump", "generator", "pln_meter", "blower")
@@ -160,9 +170,14 @@ class EquipmentPlacement(Base):
     """Where a piece of equipment sits, from a date until the next placement.
 
     In at most one of a pond, a reservoir (`in_equipment_id`) or a warehouse; in none
-    of them it stands on the grid itself. x_m / y_m are metres from the west and north
-    edges of whatever it is in (or of the grid). bearing is the way a paddlewheel
-    pushes water, 0-359 with 0 north.
+    of them it stands on the grid itself.
+
+    Inside a pond or reservoir, x_m / y_m are metres from its own west and north sides
+    and bearing (the way a paddlewheel pushes water, 0-359) is measured from its own
+    north side, so turning the pond on the drawing turns what is in it.
+    On the grid, x_m / y_m are the machine's middle on the layout drawing (metres east
+    and south of its origin, like a pond's) and bearing is how far it is turned
+    (a reservoir).
     """
 
     __tablename__ = "equipment_placements"

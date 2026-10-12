@@ -115,6 +115,8 @@ def _summary(eq: Equipment, placements: list, links: list, events: list) -> Equi
         status=status_from_events(events),
         placement=PlacementOut.model_validate(now) if now else None,
         links=[LinkOut.model_validate(link) for link in open_links(links)],
+        # `events` comes oldest first (date, then entry time).
+        last_event=EventOut.model_validate(events[-1]) if events else None,
     )
 
 

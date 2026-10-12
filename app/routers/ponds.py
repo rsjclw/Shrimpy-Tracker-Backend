@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import CurrentUser, get_current_user
 from app.database import get_db
 from app.models import Cycle, Grid, Pond
-from app.schemas import CycleOut, PondCreate, PondOut, PondUpdate
+from app.schemas import CycleOut, PondCreate, PondLayout, PondOut, PondUpdate
 from app.services.access import (
     accessible_farm_ids,
     require_farm_permission,
@@ -73,6 +73,23 @@ async def update_pond(
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ) -> Pond:
+    await require_pond_permission(db, user, pond_id, "manage")
+    pond = await get_or_404(db, Pond, pond_id, "Pond not found")
+    apply_updates(pond, payload, exclude_unset=False)
+    await db.commit()
+    await db.refresh(pond)
+    return pond
+
+
+@router.put("/{pond_id}/layout", response_model=PondOut)
+async def set_pond_layout(
+    pond_id: str,
+    payload: PondLayout,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> Pond:
+    """Move or turn the pond on its grid's layout drawing. Kept apart from PUT /ponds/{id},
+    which replaces every field it knows and so would wipe these."""
     await require_pond_permission(db, user, pond_id, "manage")
     pond = await get_or_404(db, Pond, pond_id, "Pond not found")
     apply_updates(pond, payload, exclude_unset=False)

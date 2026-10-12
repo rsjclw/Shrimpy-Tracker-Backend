@@ -38,6 +38,21 @@ class PondUpdate(PondSize):
     default_feed_time: time = DEFAULT_POND_FEED_TIME
 
 
+class PondLayout(BaseModel):
+    """Where the pond stands on its grid's layout drawing: its middle, in metres east and
+    south of the drawing's origin, and how far it is turned clockwise. No x/y: not drawn."""
+
+    x_m: Decimal | None = Field(default=None, max_digits=8, decimal_places=2)
+    y_m: Decimal | None = Field(default=None, max_digits=8, decimal_places=2)
+    rotation: int = Field(default=0, ge=0, le=359)
+
+    @model_validator(mode="after")
+    def both_or_neither(self) -> "PondLayout":
+        if (self.x_m is None) != (self.y_m is None):
+            raise ValueError("Give both x_m and y_m, or neither")
+        return self
+
+
 class PondOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -50,3 +65,7 @@ class PondOut(BaseModel):
     default_feed_time: time
     # Set from the inventory page, per warehouse. Null: this pond moves no stock.
     warehouse_id: uuid.UUID | None = None
+    # Set from the layout page (PUT /ponds/{id}/layout).
+    x_m: Decimal | None = None
+    y_m: Decimal | None = None
+    rotation: int = 0

@@ -43,10 +43,12 @@ class PlacementIn(BaseModel):
     pond_id: uuid.UUID | None = None
     in_equipment_id: uuid.UUID | None = None
     warehouse_id: uuid.UUID | None = None
-    # Metres from the west and north edges of what it sits in (or of the grid).
-    x_m: Decimal | None = Field(default=None, ge=0, max_digits=8, decimal_places=2)
-    y_m: Decimal | None = Field(default=None, ge=0, max_digits=8, decimal_places=2)
-    # Which way a paddlewheel pushes water: 0 north, 90 east.
+    # In a pond or reservoir: metres from its own west and north sides. On the grid:
+    # the machine's middle on the layout drawing, which may lie west or north of 0.
+    x_m: Decimal | None = Field(default=None, max_digits=8, decimal_places=2)
+    y_m: Decimal | None = Field(default=None, max_digits=8, decimal_places=2)
+    # In a pond or reservoir: which way a paddlewheel pushes water, from that pond's own
+    # north side (0) clockwise. On the grid: how far it is turned (a reservoir).
     bearing: int | None = Field(default=None, ge=0, le=359)
     from_date: date
     # Leave empty for where it is now; set it to record a past spot.
@@ -57,6 +59,9 @@ class PlacementIn(BaseModel):
     def one_place_and_dates_in_order(self) -> "PlacementIn":
         if _one_or_none(self.pond_id, self.in_equipment_id, self.warehouse_id) > 1:
             raise ValueError("Give at most one of pond_id, in_equipment_id, warehouse_id")
+        inside = self.pond_id is not None or self.in_equipment_id is not None
+        if inside and any(v is not None and v < 0 for v in (self.x_m, self.y_m)):
+            raise ValueError("Inside a pond or reservoir, x_m and y_m are measured from its west and north sides: 0 or more")
         if self.to_date and self.to_date < self.from_date:
             raise ValueError("to_date is before from_date")
         return self
@@ -146,6 +151,8 @@ class EquipmentOut(BaseModel):
     status: EquipmentStatus
     placement: PlacementOut | None
     links: list[LinkOut]
+    # The latest history entry (by date, then entry time), for lists.
+    last_event: EventOut | None = None
 
 
 class EquipmentDetail(EquipmentOut):

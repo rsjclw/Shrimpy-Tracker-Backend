@@ -55,7 +55,7 @@ from app.schemas.equipment import (
     PlacementIn,
     PlacementOut,
 )
-from app.schemas.pond import PondCreate, PondOut, PondUpdate
+from app.schemas.pond import PondCreate, PondLayout, PondOut, PondUpdate
 from app.schemas.prediction import (
     PredictionGeneratedCounts,
     PredictionJobOut,
@@ -121,6 +121,7 @@ __all__ = [
     "RegisteredUserOut",
     "PondCreate",
     "PondUpdate",
+    "PondLayout",
     "PondOut",
     "EquipmentCreate",
     "EquipmentUpdate",
