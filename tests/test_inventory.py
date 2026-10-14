@@ -4,8 +4,10 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 
-from app.schemas import InventoryItemCreate, MovementCreate
-from app.services.inventory import MovementError, apply_movement
+from app.models import Product, ProductUnit
+from app.routers.inventory import _pack_size
+from app.schemas import InventoryItemCreate, MovementCreate, MovementOut, MovementUpdate
+from app.services.inventory import MovementError, apply_movement, delivery_amount, unit_cost
 
 
 def test_receive_adds_to_stock():
@@ -69,3 +71,83 @@ def test_a_stock_row_needs_an_item():
 def test_opening_stock_cannot_be_negative():
     with pytest.raises(ValidationError):
         InventoryItemCreate(product_id=uuid.uuid4(), quantity=Decimal("-1"))
+
+
+# Deliveries: how they came and what they cost belong to the receive.
+
+
+def _product(base="kg", **units):
+    return Product(name="Omyacarb", base_unit=base,
+                   units=[ProductUnit(unit=u, factor_to_base=Decimal(str(f))) for u, f in units.items()])
+
+
+def test_a_delivery_in_sacks_is_the_sacks_times_their_size():
+    assert delivery_amount(None, Decimal("26"), Decimal("25")) == Decimal("650.000")
+
+
+def test_an_amount_sent_with_packs_must_agree():
+    assert delivery_amount(Decimal("650"), Decimal("26"), Decimal("25")) == Decimal("650.000")
+    with pytest.raises(MovementError):
+        delivery_amount(Decimal("600"), Decimal("26"), Decimal("25"))
+
+
+def test_a_plain_amount_needs_no_packs():
+    assert delivery_amount(Decimal("12.5"), None, None) == Decimal("12.5")
+    with pytest.raises(MovementError):
+        delivery_amount(None, None, None)
+
+
+def test_the_pack_size_defaults_to_the_products_own_unit():
+    product = _product(sack=40)
+    assert _pack_size(product, "sack", None) == Decimal("40")
+    assert _pack_size(product, "Sack", None) == Decimal("40")
+    # A delivery that came in a different bag says so.
+    assert _pack_size(product, "sack", Decimal("50")) == Decimal("50")
+    assert _pack_size(product, "kg", None) == Decimal("1")
+    assert _pack_size(product, None, None) is None
+
+
+def test_an_unknown_pack_without_a_size_is_refused():
+    with pytest.raises(MovementError, match="send pack_size"):
+        _pack_size(_product(sack=40), "jerrycan", None)
+
+
+def test_a_delivery_costs_its_total_over_its_amount():
+    assert unit_cost(Decimal("11960000"), Decimal("650")) == Decimal("18400.00")
+    assert unit_cost(None, Decimal("650")) is None
+    assert unit_cost(Decimal("100"), Decimal("0")) is None
+
+
+def test_delivery_details_belong_to_a_receive():
+    MovementCreate(kind="receive", pack_unit="sack", pack_count=Decimal("26"), total_cost=Decimal("11960000"),
+                   supplier="Mas Congwi")
+    for kind in ("use", "count"):
+        with pytest.raises(ValidationError):
+            MovementCreate(kind=kind, amount=Decimal("5"), total_cost=Decimal("1000"))
+        with pytest.raises(ValidationError):
+            MovementCreate(kind=kind, amount=Decimal("5"), supplier="Mas Congwi")
+
+
+def test_packs_come_as_unit_and_count_together():
+    with pytest.raises(ValidationError):
+        MovementCreate(kind="receive", pack_unit="sack", amount=Decimal("50"))
+    with pytest.raises(ValidationError):
+        MovementCreate(kind="receive", pack_count=Decimal("2"), amount=Decimal("50"))
+    with pytest.raises(ValidationError):
+        MovementCreate(kind="receive", amount=Decimal("50"), pack_size=Decimal("25"))
+    with pytest.raises(ValidationError):
+        MovementCreate(kind="receive")
+
+
+def test_a_cost_filled_in_later_needs_no_amount():
+    update = MovementUpdate(total_cost=Decimal("11960000"))
+    assert update.model_dump(exclude_unset=True) == {"total_cost": Decimal("11960000")}
+
+
+def test_a_received_movement_shows_what_one_unit_cost():
+    base = dict(id=uuid.uuid4(), item_id=uuid.uuid4(), quantity_after=Decimal("746.1"), note=None,
+                created_by="claude", created_at="2026-10-14T10:00:00+07:00")
+    received = MovementOut(kind="receive", delta=Decimal("650"), total_cost=Decimal("11960000"), **base)
+    assert received.unit_cost == Decimal("18400.00")
+    used = MovementOut(kind="use", delta=Decimal("-5"), **base)
+    assert used.unit_cost is None and used.total_cost is None

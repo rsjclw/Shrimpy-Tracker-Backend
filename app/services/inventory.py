@@ -37,6 +37,31 @@ def apply_movement(current: Decimal, kind: str, amount: Decimal) -> tuple[Decima
     return new - current, new
 
 
+def delivery_amount(amount: Decimal | None, pack_count: Decimal | None, pack_size: Decimal | None) -> Decimal:
+    """The base amount a receive adds: as sent, or `pack_count` packs of `pack_size`.
+
+    With both, they must agree to the gram (0.001), so a typo in either is caught
+    instead of silently picking one.
+    """
+    if pack_count is None:
+        if amount is None:
+            raise MovementError("Enter an amount, or how many packs came")
+        return amount
+    if pack_size is None:
+        raise MovementError("Say how big one pack is")
+    packed = (pack_count * pack_size).quantize(_STEP)
+    if amount is not None and amount.quantize(_STEP) != packed:
+        raise MovementError(f"{pack_count} packs of {pack_size} is {packed}, not {amount}")
+    return packed
+
+
+def unit_cost(total_cost: Decimal | None, amount: Decimal | None) -> Decimal | None:
+    """What one base unit of a delivery cost, to the rupiah cent; None without a cost or an amount."""
+    if total_cost is None or not amount or amount <= 0:
+        return None
+    return (total_cost / amount).quantize(Decimal("0.01"))
+
+
 async def _lock_items_for_products(
     db: AsyncSession, warehouse_id: UUID, product_ids: list[UUID]
 ) -> dict[UUID, InventoryItem]:

@@ -1,3 +1,4 @@
+from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -15,6 +16,7 @@ from app.schemas import (
     InventoryItemUpdate,
     MovementCreate,
     MovementOut,
+    MovementUpdate,
     WarehouseCreate,
     WarehousePonds,
     WarehouseInventoryOut,
@@ -24,7 +26,7 @@ from app.schemas import (
 from app.services.access import require_farm_permission, require_grid_permission
 from app.services.common import apply_updates, get_or_404
 from app.services.feed_stock import sync_quietly
-from app.services.inventory import MovementError, apply_movement
+from app.services.inventory import MovementError, apply_movement, delivery_amount, unit_cost
 
 router = APIRouter(tags=["inventory"])
 
@@ -333,26 +335,126 @@ async def add_movement(
         select(InventoryItem).where(InventoryItem.id == item_id).with_for_update().execution_options(populate_existing=True)
     )
     item = result.scalar_one()
+    product = await _product_with_units(db, item.product_id)
     try:
-        delta, new = apply_movement(item.quantity, payload.kind, payload.amount)
+        pack_size = _pack_size(product, payload.pack_unit, payload.pack_size)
+        amount = delivery_amount(payload.amount, payload.pack_count, pack_size)
+        delta, new = apply_movement(item.quantity, payload.kind, amount)
     except MovementError as exc:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     item.quantity = new
-    db.add(
-        InventoryMovement(
-            item_id=item.id,
-            kind=payload.kind,
-            delta=delta,
-            quantity_after=new,
-            note=(payload.note or "").strip() or None,
-            created_by=user.email or user.id,
-            # When it was written, under the row lock: feedings settle against the
-            # latest count by this time (services/feed_stock.py).
-            created_at=func.clock_timestamp(),
-        )
+    movement = InventoryMovement(
+        item_id=item.id,
+        kind=payload.kind,
+        delta=delta,
+        quantity_after=new,
+        note=(payload.note or "").strip() or None,
+        pack_unit=payload.pack_unit,
+        pack_size=pack_size,
+        pack_count=payload.pack_count,
+        total_cost=payload.total_cost,
+        supplier=payload.supplier,
+        created_by=user.email or user.id,
+        # When it was written, under the row lock: feedings settle against the
+        # latest count by this time (services/feed_stock.py).
+        created_at=func.clock_timestamp(),
     )
+    db.add(movement)
+    _delivery_sets_defaults(product, movement)
     await db.commit()
     return await _with_product(db, item.id)
+
+
+async def _product_with_units(db: AsyncSession, product_id: UUID) -> Product:
+    result = await db.execute(
+        select(Product).where(Product.id == product_id).options(selectinload(Product.units))
+    )
+    return result.scalar_one()
+
+
+def _pack_size(product: Product, pack_unit: str | None, sent: Decimal | None) -> Decimal | None:
+    """The size of one pack of this delivery: as sent, else the product's own unit of that name."""
+    if pack_unit is None:
+        return None
+    if sent is not None:
+        return sent
+    if pack_unit.lower() == product.base_unit.lower():
+        return Decimal("1")
+    for unit in product.units:
+        if unit.unit.lower() == pack_unit.lower():
+            return unit.factor_to_base
+    known = ", ".join(u.unit for u in product.units) or "none yet"
+    raise MovementError(f"{product.name} has no {pack_unit!r} size (known: {known}): send pack_size")
+
+
+def _delivery_sets_defaults(product: Product, movement: InventoryMovement) -> None:
+    """The latest delivery is what the next one will most likely be: its pack size
+    becomes the product's unit of that name and its cost the product's price."""
+    if movement.pack_unit and movement.pack_unit.lower() != product.base_unit.lower():
+        for unit in product.units:
+            if unit.unit.lower() == movement.pack_unit.lower():
+                unit.factor_to_base = movement.pack_size
+                break
+        else:
+            product.units.append(ProductUnit(unit=movement.pack_unit, factor_to_base=movement.pack_size))
+    price = unit_cost(movement.total_cost, movement.delta)
+    if price is not None:
+        product.price_per_unit = price
+
+
+@router.put("/inventory-movements/{movement_id}", response_model=MovementOut)
+async def update_movement(
+    movement_id: UUID,
+    payload: MovementUpdate,
+    db: AsyncSession = Depends(get_db),
+    user: CurrentUser = Depends(get_current_user),
+) -> InventoryMovement:
+    """Fill in what a delivery cost and how it came, once the bill is known.
+
+    Only a receive entered by hand or through the API: those a feeding or a
+    treatment wrote belong to them. The amount never changes; a pack count and
+    size sent here must multiply to it.
+    """
+    movement = await get_or_404(db, InventoryMovement, movement_id, "Movement not found")
+    item = await _require_item(db, user, movement.item_id, "manage")
+    if movement.kind != "receive" or movement.source_type is not None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Only a delivery (a receive) has these details")
+    data = payload.model_dump(exclude_unset=True)
+    product = await _product_with_units(db, item.product_id)
+    if "pack_unit" in data or "pack_count" in data or "pack_size" in data:
+        pack_unit = data.get("pack_unit", movement.pack_unit)
+        pack_count = data.get("pack_count", movement.pack_count)
+        try:
+            if (pack_unit is None) != (pack_count is None):
+                raise MovementError("Send pack_unit and pack_count together")
+            size = _pack_size(product, pack_unit, data.get("pack_size"))
+            delivery_amount(movement.delta, pack_count, size)
+        except MovementError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+        movement.pack_unit, movement.pack_count, movement.pack_size = pack_unit, pack_count, size
+    for field in ("total_cost", "supplier"):
+        if field in data:
+            setattr(movement, field, data[field])
+    if "note" in data:
+        movement.note = (data["note"] or "").strip() or None
+    # The product's defaults follow only the latest delivery that says something.
+    later = await db.execute(
+        select(func.count())
+        .select_from(InventoryMovement)
+        .join(InventoryItem, InventoryItem.id == InventoryMovement.item_id)
+        .where(
+            InventoryItem.product_id == item.product_id,
+            InventoryMovement.kind == "receive",
+            InventoryMovement.source_type.is_(None),
+            InventoryMovement.created_at > movement.created_at,
+            InventoryMovement.total_cost.is_not(None),
+        )
+    )
+    if not later.scalar_one():
+        _delivery_sets_defaults(product, movement)
+    await db.commit()
+    await db.refresh(movement)
+    return movement
 
 
 @router.get("/inventory-items/{item_id}/movements", response_model=list[MovementOut])

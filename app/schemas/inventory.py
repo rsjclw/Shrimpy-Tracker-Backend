@@ -160,11 +160,60 @@ class WarehouseInventoryOut(WarehouseOut):
 
 
 
-class MovementCreate(BaseModel):
-    """receive/use take a positive amount; count sets the exact amount on hand (stock take)."""
+class _DeliveryDetails(BaseModel):
+    """How a delivery came and what it cost. Pack sizes and prices change between
+    deliveries, so they belong to the receive, not only to the product."""
+
+    # One of the product's units, e.g. "sack". Its size defaults to that unit's size.
+    pack_unit: str | None = Field(default=None, max_length=30)
+    pack_count: Decimal | None = Field(default=None, gt=0)
+    # Base units in one pack of this delivery; sent when it differs from the usual.
+    pack_size: Decimal | None = Field(default=None, gt=0)
+    # Rupiah for the whole delivery.
+    total_cost: Decimal | None = Field(default=None, ge=0)
+    supplier: str | None = Field(default=None, max_length=150)
+
+    @field_validator("pack_unit", "supplier")
+    @classmethod
+    def _blank_is_none(cls, value: str | None) -> str | None:
+        return (value or "").strip() or None
+
+    @model_validator(mode="after")
+    def _packs_together(self):
+        if (self.pack_unit is None) != (self.pack_count is None):
+            raise ValueError("Send pack_unit and pack_count together")
+        if self.pack_size is not None and self.pack_unit is None:
+            raise ValueError("pack_size needs pack_unit and pack_count")
+        return self
+
+    def has_details(self) -> bool:
+        return any(v is not None for v in (self.pack_unit, self.total_cost, self.supplier))
+
+
+class MovementCreate(_DeliveryDetails):
+    """receive/use take a positive amount; count sets the exact amount on hand (stock take).
+
+    A receive may also say how it came (`pack_count` packs of `pack_unit`) and what it
+    cost. `amount` may then be left out: it is the packs times their size.
+    """
 
     kind: MovementKind
-    amount: Decimal = Field(ge=0)
+    amount: Decimal | None = Field(default=None, ge=0)
+    note: str | None = None
+
+    @model_validator(mode="after")
+    def _details_are_for_receives(self) -> "MovementCreate":
+        if self.kind != "receive" and self.has_details():
+            raise ValueError("Packs, cost and supplier belong to a receive")
+        if self.amount is None and self.pack_count is None:
+            raise ValueError("Enter an amount")
+        return self
+
+
+class MovementUpdate(_DeliveryDetails):
+    """A receive's delivery details, filled in afterwards: the bill is often paid a day
+    later. The amount never changes here; correct stock with a use or a count."""
+
     note: str | None = None
 
 
@@ -177,5 +226,18 @@ class MovementOut(BaseModel):
     delta: Decimal
     quantity_after: Decimal
     note: str | None
+    pack_unit: str | None = None
+    pack_size: Decimal | None = None
+    pack_count: Decimal | None = None
+    total_cost: Decimal | None = None
+    supplier: str | None = None
+    # What one base unit of this delivery cost.
+    unit_cost: Decimal | None = None
     created_by: str | None
     created_at: datetime
+
+    @model_validator(mode="after")
+    def _unit_cost(self) -> "MovementOut":
+        if self.kind == "receive" and self.total_cost is not None and self.delta > 0:
+            self.unit_cost = (self.total_cost / self.delta).quantize(Decimal("0.01"))
+        return self

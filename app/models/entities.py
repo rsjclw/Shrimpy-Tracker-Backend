@@ -685,5 +685,13 @@ class InventoryMovement(Base):
     # stock back. Null for the manual receive/use/count a person enters by hand.
     source_type: Mapped[str | None] = mapped_column(String(20))  # treatment
     source_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    # A receive's delivery, as it came: `pack_count` packs of `pack_unit`, each
+    # `pack_size` base units at that delivery (the next one may come in another bag),
+    # what it all cost and who sold it. Null on everything but a receive.
+    pack_unit: Mapped[str | None] = mapped_column(String(30))
+    pack_size: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    pack_count: Mapped[Decimal | None] = mapped_column(Numeric(14, 3))
+    total_cost: Mapped[Decimal | None] = mapped_column(Numeric(16, 2))
+    supplier: Mapped[str | None] = mapped_column(String(150))
     created_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), index=True)
